@@ -165,7 +165,7 @@ Um cadastro sem link nenhum volta com `"origem": {"tipo": "organico", "motivo": 
 
 ## Validação e limites
 
-Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um schema zod em [`src/schemas.ts`](src/schemas.ts). Campos extras são ignorados, strings passam por `trim`, e datas exigem ISO 8601 com fuso. O que vem errado é recusado sem gravar nada:
+Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um schema zod em [`src/schemas.ts`](src/schemas.ts). Campos extras são ignorados, strings passam por `trim`, e datas exigem ISO 8601 com fuso. Erro de schema é recusado sem gravar nada. Link recusado (inválido, `cid` desconhecido, forjado ou de outro install) grava só a abertura recusada, para a auditoria.
 
 | situação | status | `error.code` |
 |---|---|---|
@@ -205,7 +205,7 @@ $ curl -s localhost:3104/touches -H 'content-type: application/json' \
 | origem não pode ser forjada pela URL | `api.test.ts`: "origem forjada: trocar src ou params na url de um cid real devolve 409 click_divergente", "cid que o redirecionador não emitiu..." |
 | aberturas recusadas na auditoria | `api.test.ts`: "cadastro só com toques rejeitados vira orgânico com motivo so_toques_rejeitados..." |
 | ordem de chegada não muda o resultado | `attribution.test.ts`: "as 720 ordens possíveis..."; `api.test.ts`: "ordem de chegada ... com o mesmo horário não muda a origem" |
-| payloads inválidos não gravam nada | `payloads-invalidos.test.ts` |
+| payloads inválidos não gravam nada (link recusado grava só a recusa) | `payloads-invalidos.test.ts` |
 
 Os testes de integração usam `app.request` com sqlite `:memory:` e um `FixedClock` ([`src/clock.ts`](src/clock.ts)) que só anda quando o teste manda. Com ele, empates de horário e janelas de 7 ou 60 dias são testados sem espera.
 
