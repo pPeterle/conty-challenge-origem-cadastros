@@ -1,71 +1,51 @@
 // Contrato do link. Tudo que importa para a atribuição viaja na query string,
 // porque o webview de Instagram/WhatsApp costuma não mandar referrer.
+import { appLinkQuerySchema, issueDetails, type AppLink, type IssueDetail, type LinkParams } from "./schemas.ts";
 
-export const SOURCES = ["campanha", "indicacao", "comunidade"] as const;
-export type Source = (typeof SOURCES)[number];
+export { SOURCES, type Source, type LinkParams, type AppLink } from "./schemas.ts";
 
-/** Parâmetros aceitos por fonte. O primeiro de cada lista é obrigatório. */
-const PARAMS_BY_SOURCE: Record<Source, { required: string; optional: string[] }> = {
-  campanha: { required: "cmp", optional: ["ch"] },
-  indicacao: { required: "ref", optional: [] },
-  comunidade: { required: "com", optional: ["ch"] },
-};
+export type ParseResult<T> = { ok: true; value: T } | { ok: false; message: string; details: IssueDetail[] };
 
-const VALUE_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const CLICK_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
-
-export interface LinkParams {
-  source: Source;
-  params: Record<string, string>;
+/** Igual ao que o validador do Hono faz com a query: chave repetida vira lista (e é recusada). */
+export function queryToObject(query: URLSearchParams): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const key of new Set(query.keys())) {
+    const all = query.getAll(key);
+    out[key] = all.length === 1 ? all[0]! : all;
+  }
+  return out;
 }
 
-export type ParseResult<T> = { ok: true; value: T } | { ok: false; message: string };
-
-function isSource(v: string | undefined): v is Source {
-  return v !== undefined && (SOURCES as readonly string[]).includes(v);
-}
-
-/** Valida src + parâmetros da fonte. Parâmetros desconhecidos são descartados. */
-export function parseLinkParams(query: URLSearchParams): ParseResult<LinkParams> {
-  const src = query.get("src") ?? undefined;
-  if (!isSource(src)) {
-    return { ok: false, message: `src precisa ser um de: ${SOURCES.join(", ")}` };
-  }
-  const spec = PARAMS_BY_SOURCE[src];
-  const params: Record<string, string> = {};
-  for (const key of [spec.required, ...spec.optional]) {
-    const value = query.get(key);
-    if (value === null) continue;
-    if (!VALUE_RE.test(value)) {
-      return { ok: false, message: `parâmetro ${key} inválido` };
-    }
-    params[key] = value;
-  }
-  if (params[spec.required] === undefined) {
-    return { ok: false, message: `link de ${src} precisa do parâmetro ${spec.required}` };
-  }
-  return { ok: true, value: { source: src, params } };
-}
-
-export interface AppLink extends LinkParams {
-  clickId: string;
+function sameAppLinkTarget(url: URL, base: URL): boolean {
+  return url.protocol === base.protocol && url.host === base.host && url.pathname === base.pathname;
 }
 
 /** Lê o link que o app abriu (o que chega depois do redirecionador, já com cid). */
-export function parseAppLink(url: string): ParseResult<AppLink> {
+export function parseAppLink(url: string, appLinkBase: string): ParseResult<AppLink> {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { ok: false, message: "url inválida" };
+    return { ok: false, message: "url inválida", details: [{ campo: "url", motivo: "não é uma URL" }] };
   }
-  const base = parseLinkParams(parsed.searchParams);
-  if (!base.ok) return base;
-  const cid = parsed.searchParams.get("cid");
-  if (cid === null || !CLICK_ID_RE.test(cid)) {
-    return { ok: false, message: "link sem cid válido (8 a 64 caracteres, letras, números, _ ou -)" };
+  const base = new URL(appLinkBase);
+  if (!sameAppLinkTarget(parsed, base)) {
+    return {
+      ok: false,
+      message: `url precisa apontar para ${base.origin}${base.pathname}`,
+      details: [{ campo: "url", motivo: "endereço diferente do link do app" }],
+    };
   }
-  return { ok: true, value: { ...base.value, clickId: cid } };
+  const result = appLinkQuerySchema.safeParse(queryToObject(parsed.searchParams));
+  if (!result.success) {
+    const details = issueDetails(result.error);
+    return { ok: false, message: describe(details), details };
+  }
+  return { ok: true, value: result.data };
+}
+
+export function describe(details: IssueDetail[]): string {
+  return details.map((d) => `${d.campo}: ${d.motivo}`).join("; ");
 }
 
 /** Monta o link que abre o app, com o click id gerado no redirecionador. */

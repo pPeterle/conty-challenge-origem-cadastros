@@ -1,6 +1,7 @@
 import { createApp } from "../../src/app.ts";
 import { DAY, FixedClock } from "../../src/clock.ts";
 import { openDb } from "../../src/db.ts";
+import { DEFAULT_FIRST_OPEN_LIMITS } from "../../src/config.ts";
 
 export const START = "2026-03-01T12:00:00.000Z";
 
@@ -11,7 +12,7 @@ export function setup(opts: { windowMs?: number } = {}) {
   const app = createApp({
     db,
     clock,
-    config: { windowMs: opts.windowMs ?? 7 * DAY, appLinkBase: "https://conty.app/abrir" },
+    config: { windowMs: opts.windowMs ?? 7 * DAY, appLinkBase: "https://conty.app/abrir", firstOpen: DEFAULT_FIRST_OPEN_LIMITS },
     newClickId: () => `clk_test${String(++n).padStart(4, "0")}`,
   });
   const post = (path: string, body: unknown) =>

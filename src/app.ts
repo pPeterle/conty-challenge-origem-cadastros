@@ -1,10 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { zValidator } from "@hono/zod-validator";
+import type { ZodSchema } from "zod";
 import type { Clock } from "./clock.ts";
 import type { AttributionConfig } from "./config.ts";
 import { TIE_PRIORITY, decideAttribution } from "./attribution.ts";
-import { buildAppLink, parseAppLink, parseLinkParams } from "./link.ts";
+import { buildAppLink, describe, parseAppLink } from "./link.ts";
+import {
+  installBodySchema,
+  issueDetails,
+  linkQuerySchema,
+  signupBodySchema,
+  touchBodySchema,
+  userParamSchema,
+  type IssueDetail,
+} from "./schemas.ts";
 import {
   auditForSignup,
   ensureInstall,
@@ -27,26 +40,34 @@ export interface AppDeps {
   newClickId?: () => string;
 }
 
-const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+// Os corpos desta API têm poucas centenas de bytes; 16 KB já é folga de sobra.
+export const MAX_BODY_BYTES = 16 * 1024;
+
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
 
-function fail(c: Context, status: ContentfulStatusCode, code: string, message: string) {
-  return c.json({ error: { code, message } }, status);
+function fail(c: Context, status: ContentfulStatusCode, code: string, message: string, details?: IssueDetail[]) {
+  return c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 }
 
-async function readJson(c: Context): Promise<Record<string, unknown> | null> {
-  try {
-    const body = await c.req.json();
-    return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
-  } catch {
-    return null;
+/** Validação com zod e um formato de erro só: 400 com o caminho e o motivo de cada campo. */
+function validate<T extends ZodSchema>(target: "json" | "query" | "param", schema: T, code = "validacao") {
+  const prefix = code === "link_invalido" ? "link inválido" : "payload inválido";
+  return zValidator(target, schema, (result, c) => {
+    if (!result.success) {
+      const details = issueDetails(result.error);
+      return fail(c, 400, code, `${prefix}: ${describe(details)}`, details);
+    }
+  });
+}
+
+/** Sem isso, o validador do Hono trata corpo com outro content-type como `{}`. */
+const requireJson: MiddlewareHandler = async (c, next) => {
+  const type = c.req.header("content-type") ?? "";
+  if (!/^application\/([a-z0-9.+-]*\+)?json(\s*;|$)/i.test(type)) {
+    return fail(c, 400, "content_type_invalido", "envie o corpo como JSON com content-type: application/json");
   }
-}
-
-function idField(body: Record<string, unknown>, name: string): string | null {
-  const v = body[name];
-  return typeof v === "string" && ID_RE.test(v) ? v : null;
-}
+  await next();
+};
 
 function touchView(t: TouchRow) {
   return {
@@ -75,6 +96,7 @@ function attributionView(db: Db, s: SignupRow) {
       nome: "last_touch",
       janela_horas: s.window_ms / 3_600_000,
       janela_inicio: iso(s.first_open_at),
+      janela_inicio_fonte: s.first_open_source,
       janela_fim: s.first_open_at === null ? null : iso(s.first_open_at + s.window_ms),
       desempate: [...TIE_PRIORITY, "click_id"],
     },
@@ -84,7 +106,20 @@ function attributionView(db: Db, s: SignupRow) {
       ...touchView(t),
       resultado: "perdeu",
       motivo: "posterior_ao_cadastro",
+      // O aparelho diz que abriu antes do cadastro, mas o toque só chegou depois (fila offline
+      // ou relógio errado). Fica sinalizado para análise; a origem não muda.
+      relogio_diverge: t.client_opened_at !== null && Date.parse(t.client_opened_at) <= s.signup_at,
     })),
+  };
+}
+
+function installView(i: NonNullable<ReturnType<typeof getInstall>>) {
+  return {
+    install_id: i.install_id,
+    first_open_at: iso(i.first_open_at),
+    first_open_source: i.first_open_source,
+    server_first_open_at: iso(i.server_first_open_at),
+    device_first_open_at: iso(i.device_first_open_at),
   };
 }
 
@@ -94,75 +129,68 @@ export function createApp(deps: AppDeps) {
   const app = new Hono();
 
   app.onError((err, c) => {
+    if (err instanceof HTTPException && err.status === 400) {
+      return fail(c, 400, "corpo_invalido", "corpo precisa ser JSON válido");
+    }
     console.error(err);
     return fail(c, 500, "erro_interno", "erro inesperado");
   });
   app.notFound((c) => fail(c, 404, "rota_nao_encontrada", "rota não encontrada"));
 
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: MAX_BODY_BYTES,
+      onError: (c) => fail(c, 413, "corpo_grande_demais", `corpo maior que ${MAX_BODY_BYTES} bytes`),
+    }),
+  );
+
   app.get("/health", (c) => c.json({ ok: true }));
 
   // Redirecionador: o link público não tem cid; aqui cada clique ganha o seu.
-  app.get("/l", (c) => {
-    const parsed = parseLinkParams(new URL(c.req.url).searchParams);
-    if (!parsed.ok) return fail(c, 400, "link_invalido", parsed.message);
-    return c.redirect(buildAppLink(config.appLinkBase, parsed.value, newClickId()), 302);
+  app.get("/l", validate("query", linkQuerySchema, "link_invalido"), (c) => {
+    return c.redirect(buildAppLink(config.appLinkBase, c.req.valid("query"), newClickId()), 302);
   });
 
-  // Primeira abertura do app. Repetir não muda o first_open_at.
-  app.post("/installs", async (c) => {
-    const body = await readJson(c);
-    const installId = body && idField(body, "install_id");
-    if (!installId) return fail(c, 400, "validacao", "install_id obrigatório (1 a 128 caracteres, letras, números, _ ou -)");
-    const { install, created } = ensureInstall(db, installId, clock.now().getTime());
-    return c.json(
-      { install_id: install.install_id, first_open_at: iso(install.first_open_at), novo: created },
-      created ? 201 : 200,
-    );
+  // Primeira abertura do app. Repetir não muda o first_open_at (ver ensureInstall).
+  app.post("/installs", requireJson, validate("json", installBodySchema), (c) => {
+    const body = c.req.valid("json");
+    const deviceAt = body.first_open_at ? Date.parse(body.first_open_at) : null;
+    const { install, created } = ensureInstall(db, body.install_id, clock.now().getTime(), deviceAt, config.firstOpen);
+    return c.json({ ...installView(install), novo: created }, created ? 201 : 200);
   });
 
   // Toque: o app abriu por um link. O horário que vale é o do servidor.
-  app.post("/touches", async (c) => {
-    const body = await readJson(c);
-    const installId = body && idField(body, "install_id");
-    if (!body || !installId) return fail(c, 400, "validacao", "install_id obrigatório (1 a 128 caracteres, letras, números, _ ou -)");
-    if (typeof body.url !== "string") return fail(c, 400, "validacao", "url obrigatória: o link que abriu o app");
-    const openedAt = body.opened_at;
-    if (openedAt !== undefined && (typeof openedAt !== "string" || Number.isNaN(Date.parse(openedAt)))) {
-      return fail(c, 400, "validacao", "opened_at precisa ser data ISO 8601");
-    }
-    const link = parseAppLink(body.url);
-    if (!link.ok) return fail(c, 400, "link_invalido", link.message);
+  app.post("/touches", requireJson, validate("json", touchBodySchema), (c) => {
+    const body = c.req.valid("json");
+    const link = parseAppLink(body.url, config.appLinkBase);
+    if (!link.ok) return fail(c, 400, "link_invalido", link.message, link.details);
 
     const now = clock.now().getTime();
     const outcome = transaction(db, () => {
       // Se o toque chega antes do registro de primeira abertura, ele mesmo registra.
-      ensureInstall(db, installId, now);
+      ensureInstall(db, body.install_id, now, null, config.firstOpen);
       return insertTouch(db, {
         clickId: link.value.clickId,
-        installId,
+        installId: body.install_id,
         source: link.value.source,
         params: link.value.params,
         touchedAt: now,
-        clientOpenedAt: (openedAt as string | undefined) ?? null,
+        clientOpenedAt: body.opened_at ? new Date(body.opened_at).toISOString() : null,
       });
     });
 
-    if (outcome.touch.install_id !== installId) {
+    if (outcome.touch.install_id !== body.install_id) {
       return fail(c, 409, "click_de_outro_install", "esse click_id já foi registrado por outro install");
     }
     return c.json(
-      { install_id: installId, ...touchView(outcome.touch), duplicado: !outcome.created },
+      { install_id: body.install_id, ...touchView(outcome.touch), duplicado: !outcome.created },
       outcome.created ? 201 : 200,
     );
   });
 
-  app.post("/signups", async (c) => {
-    const body = await readJson(c);
-    const userId = body && idField(body, "user_id");
-    const installId = body && idField(body, "install_id");
-    if (!userId || !installId) {
-      return fail(c, 400, "validacao", "user_id e install_id obrigatórios (1 a 128 caracteres, letras, números, _ ou -)");
-    }
+  app.post("/signups", requireJson, validate("json", signupBodySchema), (c) => {
+    const { user_id: userId, install_id: installId } = c.req.valid("json");
 
     const result = transaction(db, () => {
       const existing = getSignup(db, userId);
@@ -185,7 +213,14 @@ export function createApp(deps: AppDeps) {
       });
       insertSignup(
         db,
-        { userId, installId, signupAt, firstOpenAt: install?.first_open_at ?? null, windowMs: config.windowMs },
+        {
+          userId,
+          installId,
+          signupAt,
+          firstOpenAt: install?.first_open_at ?? null,
+          firstOpenSource: install?.first_open_source ?? null,
+          windowMs: config.windowMs,
+        },
         decision,
       );
       return { signup: getSignup(db, userId)!, created: true };
@@ -197,8 +232,8 @@ export function createApp(deps: AppDeps) {
     return c.json(attributionView(db, result.signup), result.created ? 201 : 200);
   });
 
-  app.get("/signups/:userId/attribution", (c) => {
-    const signup = getSignup(db, c.req.param("userId"));
+  app.get("/signups/:userId/attribution", validate("param", userParamSchema), (c) => {
+    const signup = getSignup(db, c.req.valid("param").userId);
     if (!signup) return fail(c, 404, "cadastro_nao_encontrado", "cadastro não encontrado");
     return c.json(attributionView(db, signup));
   });

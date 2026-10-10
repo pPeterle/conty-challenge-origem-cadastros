@@ -1,13 +1,24 @@
 import { DatabaseSync } from "node:sqlite";
 import type { Source } from "./link.ts";
-import type { Decision, Origin, OriginReason, TouchReason } from "./attribution.ts";
+import {
+  chooseFirstOpen,
+  type Decision,
+  type FirstOpenLimits,
+  type FirstOpenSource,
+  type Origin,
+  type OriginReason,
+  type TouchReason,
+} from "./attribution.ts";
 
 export type Db = DatabaseSync;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS installs (
-  install_id    TEXT PRIMARY KEY,
-  first_open_at INTEGER NOT NULL
+  install_id           TEXT PRIMARY KEY,
+  first_open_at        INTEGER NOT NULL,   -- início da janela (o horário escolhido)
+  first_open_source    TEXT NOT NULL CHECK (first_open_source IN ('aparelho','servidor')),
+  server_first_open_at INTEGER NOT NULL,   -- quando o servidor soube do install
+  device_first_open_at INTEGER             -- o que o aparelho informou, aceito ou não
 );
 
 CREATE TABLE IF NOT EXISTS touches (
@@ -26,6 +37,7 @@ CREATE TABLE IF NOT EXISTS signups (
   install_id       TEXT NOT NULL,
   signup_at        INTEGER NOT NULL,
   first_open_at    INTEGER,
+  first_open_source TEXT,
   window_ms        INTEGER NOT NULL,
   origin           TEXT NOT NULL CHECK (origin IN ('campanha','indicacao','comunidade','organico')),
   reason           TEXT NOT NULL,
@@ -64,6 +76,9 @@ export function transaction<T>(db: Db, fn: () => T): T {
 export interface InstallRow {
   install_id: string;
   first_open_at: number;
+  first_open_source: FirstOpenSource;
+  server_first_open_at: number;
+  device_first_open_at: number | null;
 }
 
 export interface TouchRow {
@@ -81,6 +96,7 @@ export interface SignupRow {
   install_id: string;
   signup_at: number;
   first_open_at: number | null;
+  first_open_source: FirstOpenSource | null;
   window_ms: number;
   origin: Origin;
   reason: OriginReason;
@@ -92,11 +108,34 @@ export interface AuditRow extends TouchRow {
   reason: TouchReason;
 }
 
-/** Registra a primeira abertura. Se já existe, mantém o first_open_at original. */
-export function ensureInstall(db: Db, installId: string, at: number): { install: InstallRow; created: boolean } {
+/**
+ * Registra a primeira abertura. Se o install já existe, o first_open_at só muda num caso:
+ * ele veio do horário do servidor (o toque chegou antes do POST /installs) e o aparelho
+ * agora informa uma primeira abertura plausível e anterior. Isso acontece uma vez só.
+ */
+export function ensureInstall(
+  db: Db,
+  installId: string,
+  serverAt: number,
+  deviceAt: number | null,
+  limits: FirstOpenLimits,
+): { install: InstallRow; created: boolean } {
+  const chosen = chooseFirstOpen(deviceAt, serverAt, limits);
   const res = db
-    .prepare("INSERT INTO installs (install_id, first_open_at) VALUES (?, ?) ON CONFLICT(install_id) DO NOTHING")
-    .run(installId, at);
+    .prepare(
+      `INSERT INTO installs (install_id, first_open_at, first_open_source, server_first_open_at, device_first_open_at)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(install_id) DO NOTHING`,
+    )
+    .run(installId, chosen.at, chosen.source, serverAt, deviceAt);
+  if (res.changes === 0 && deviceAt !== null) {
+    const existing = getInstall(db, installId)!;
+    if (existing.device_first_open_at === null && existing.first_open_source === "servidor") {
+      const useDevice = chosen.source === "aparelho" && chosen.at < existing.first_open_at;
+      db.prepare(
+        `UPDATE installs SET device_first_open_at = ?, first_open_at = ?, first_open_source = ? WHERE install_id = ?`,
+      ).run(deviceAt, useDevice ? chosen.at : existing.first_open_at, useDevice ? "aparelho" : "servidor", installId);
+    }
+  }
   return { install: getInstall(db, installId)!, created: res.changes === 1 };
 }
 
@@ -142,13 +181,20 @@ export function getSignup(db: Db, userId: string): SignupRow | undefined {
 
 export function insertSignup(
   db: Db,
-  s: { userId: string; installId: string; signupAt: number; firstOpenAt: number | null; windowMs: number },
+  s: {
+    userId: string;
+    installId: string;
+    signupAt: number;
+    firstOpenAt: number | null;
+    firstOpenSource: FirstOpenSource | null;
+    windowMs: number;
+  },
   decision: Decision,
 ): void {
   db.prepare(
-    `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, window_ms, origin, reason, winning_touch_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.windowMs, decision.origin, decision.reason, decision.winnerTouchId);
+    `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, first_open_source, window_ms, origin, reason, winning_touch_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, decision.origin, decision.reason, decision.winnerTouchId);
   const stmt = db.prepare("INSERT INTO signup_touches (user_id, touch_id, result, reason) VALUES (?, ?, ?, ?)");
   for (const v of decision.verdicts) stmt.run(s.userId, v.touchId, v.result, v.reason);
 }

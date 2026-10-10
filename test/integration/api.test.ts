@@ -30,7 +30,11 @@ describe("contrato do link (redirecionador)", () => {
     const r = await get("/l?src=indicacao");
     expect(r.status).toBe(400);
     expect(await r.json()).toEqual({
-      error: { code: "link_invalido", message: "link de indicacao precisa do parâmetro ref" },
+      error: {
+        code: "link_invalido",
+        message: "link inválido: ref: obrigatório em link de indicacao",
+        details: [{ campo: "ref", motivo: "obrigatório em link de indicacao" }],
+      },
     });
   });
 });
@@ -43,7 +47,55 @@ describe("primeira abertura", () => {
     const b = await post("/installs", { install_id: "inst_1" });
     expect(a.status).toBe(201);
     expect(b.status).toBe(200);
-    expect(await b.json()).toEqual({ install_id: "inst_1", first_open_at: START, novo: false });
+    expect(await b.json()).toEqual({
+      install_id: "inst_1",
+      first_open_at: START,
+      first_open_source: "servidor",
+      server_first_open_at: START,
+      device_first_open_at: null,
+      novo: false,
+    });
+  });
+
+  it("app que abriu offline: a janela conta do first_open_at informado pelo aparelho", async () => {
+    const { post, clock } = setup();
+    clock.advance(5 * DAY); // abriu em START sem rede; o POST /installs só chega 5 dias depois
+    const inst = await post("/installs", { install_id: "inst_1", first_open_at: START });
+    expect(await inst.json()).toMatchObject({
+      first_open_at: START,
+      first_open_source: "aparelho",
+      server_first_open_at: "2026-03-06T12:00:00.000Z",
+      device_first_open_at: START,
+    });
+    clock.advance(3 * DAY); // dia 8 contado do aparelho: fora da janela de 7 dias
+    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
+    expect(body.regra).toMatchObject({ janela_inicio: START, janela_inicio_fonte: "aparelho" });
+    expect(body.origem).toMatchObject({ tipo: "organico", motivo: "cadastro_apos_janela" });
+  });
+
+  it.each([
+    ["no futuro além da tolerância de 5 min", "2026-03-01T12:06:00.000Z"],
+    ["mais antigo que 30 dias", "2026-01-29T12:00:00.000Z"],
+  ])("first_open_at do aparelho %s é ignorado e vale o horário do servidor", async (_nome, deviceAt) => {
+    const { post } = setup();
+    const r = await post("/installs", { install_id: "inst_1", first_open_at: deviceAt });
+    expect(await r.json()).toMatchObject({
+      first_open_at: START,
+      first_open_source: "servidor",
+      device_first_open_at: deviceAt,
+    });
+  });
+
+  it("toque que chegou antes do POST /installs: o first_open_at do aparelho ainda corrige o início, uma vez só", async () => {
+    const { post, clock } = setup();
+    clock.advance(HOUR);
+    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const r = await post("/installs", { install_id: "inst_1", first_open_at: START });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ first_open_at: START, first_open_source: "aparelho" });
+    const again = await post("/installs", { install_id: "inst_1", first_open_at: "2026-02-27T12:00:00.000Z" });
+    expect(await again.json()).toMatchObject({ first_open_at: START, device_first_open_at: START });
   });
 
   it("toque que chega antes do registro de primeira abertura registra o install com o horário dele", async () => {
@@ -72,12 +124,17 @@ describe("toques e clique repetido", () => {
     expect(signup.origem.tipo).toBe("campanha");
   });
 
-  it("click_id de outro install devolve 409", async () => {
-    const { post } = setup();
+  it("click_id de outro install devolve 409, mas a abertura do segundo install fica registrada", async () => {
+    const { post, db } = setup();
     await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
     const r = await post("/touches", { install_id: "inst_2", url: campaignLink("clk_aaaa0001") });
     expect(r.status).toBe(409);
     expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_de_outro_install");
+    expect(db.prepare("SELECT install_id FROM installs ORDER BY install_id").all()).toEqual([
+      { install_id: "inst_1" },
+      { install_id: "inst_2" },
+    ]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 1 });
   });
 
   it("toque sem cid ou com payload inválido devolve 400", async () => {
@@ -130,35 +187,46 @@ describe("cadastro e auditoria", () => {
     ]);
   });
 
-  it("toque fora da janela (medida do first_open_at) não vence", async () => {
+  it("toque fora da janela (medida do first_open_at) não vence: cadastro fora da janela vira orgânico", async () => {
     const { post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });
     clock.advance(DAY);
     await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
-    clock.advance(7 * DAY); // first_open + 8 dias
+    clock.advance(7 * DAY); // first_open + 8 dias: fora da janela
     await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
-    expect(body.origem.tipo).toBe("comunidade");
+    expect(body.origem).toEqual({ tipo: "organico", motivo: "cadastro_apos_janela", click_id: null, params: null });
     expect(body.regra).toEqual({
       nome: "last_touch",
       janela_horas: 168,
       janela_inicio: START,
+      janela_inicio_fonte: "servidor",
       janela_fim: "2026-03-08T12:00:00.000Z",
       desempate: ["campanha", "indicacao", "comunidade", "click_id"],
     });
-    expect(body.toques_considerados.find((t) => t.click_id === "clk_camp0001")).toMatchObject({
-      resultado: "perdeu",
-      motivo: "fora_da_janela",
-    });
+    expect(body.toques_considerados.map((t) => [t.click_id, t.resultado, t.motivo])).toEqual([
+      ["clk_com00001", "perdeu", "cadastro_apos_janela"],
+      ["clk_camp0001", "perdeu", "cadastro_apos_janela"],
+    ]);
   });
 
-  it("só toque fora da janela: orgânico com motivo nenhum_toque_valido", async () => {
+  it("cadastro após o fim da janela vira orgânico", async () => {
     const { post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });
-    clock.advance(10 * DAY);
+    clock.advance(DAY);
+    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    clock.advance(59 * DAY);
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
+    expect(body.origem).toMatchObject({ tipo: "organico", motivo: "cadastro_apos_janela" });
+  });
+
+  it("toque e cadastro no último milissegundo da janela ainda contam", async () => {
+    const { post, clock } = setup({ windowMs: 7 * DAY });
+    await post("/installs", { install_id: "inst_1" });
+    clock.advance(7 * DAY);
     await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
-    expect(body.origem).toMatchObject({ tipo: "organico", motivo: "nenhum_toque_valido", click_id: null });
+    expect(body.origem).toMatchObject({ tipo: "campanha", click_id: "clk_camp0001" });
   });
 
   it("toque posterior ao cadastro é registrado, aparece na auditoria e não altera a origem", async () => {
@@ -174,8 +242,20 @@ describe("cadastro e auditoria", () => {
     expect(body.origem.tipo).toBe("comunidade");
     expect(body.toques_considerados.map((t) => t.click_id)).toEqual(["clk_com00001"]);
     expect(body.toques_apos_cadastro).toMatchObject([
-      { click_id: "clk_camp0001", resultado: "perdeu", motivo: "posterior_ao_cadastro" },
+      { click_id: "clk_camp0001", resultado: "perdeu", motivo: "posterior_ao_cadastro", relogio_diverge: false },
     ]);
+  });
+
+  it("toque entregue depois do cadastro com opened_at anterior: relogio_diverge, sem mudar a origem", async () => {
+    const { post, get, clock } = setup();
+    await post("/installs", { install_id: "inst_1" });
+    clock.advance(HOUR);
+    await post("/signups", { user_id: "u_1", install_id: "inst_1" });
+    clock.advance(MINUTE);
+    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001"), opened_at: "2026-03-01T12:30:00.000Z" });
+    const body = (await (await get("/signups/u_1/attribution")).json()) as Attribution;
+    expect(body.origem.tipo).toBe("organico");
+    expect(body.toques_apos_cadastro).toMatchObject([{ click_id: "clk_ref00001", relogio_diverge: true }]);
   });
 
   it("cadastro sem toque fica orgânico com motivo sem_toques gravado", async () => {

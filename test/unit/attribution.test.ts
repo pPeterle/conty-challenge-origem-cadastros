@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DAY, HOUR, MINUTE } from "../../src/clock.ts";
-import { decideAttribution, type DecisionInput, type TouchInput } from "../../src/attribution.ts";
+import { chooseFirstOpen, decideAttribution, type DecisionInput, type TouchInput } from "../../src/attribution.ts";
 
 const T0 = Date.parse("2026-03-01T12:00:00.000Z");
 const base = (touches: TouchInput[], over: Partial<DecisionInput> = {}): DecisionInput => ({
@@ -60,23 +60,32 @@ describe("decideAttribution", () => {
     expect(d.origin).toBe("comunidade");
   });
 
-  it("toque fora da janela não vence, mesmo sendo o mais recente", () => {
+  it("toque fora da janela não vence: o cadastro também ficou fora e vira orgânico", () => {
     const d = decideAttribution(
       base([touch(1, "campanha", T0 + HOUR), touch(2, "indicacao", T0 + 8 * DAY)], { signupAt: T0 + 9 * DAY }),
     );
-    expect(d.origin).toBe("campanha");
-    expect(d.verdicts[1]).toEqual({ touchId: 2, result: "perdeu", reason: "fora_da_janela" });
+    expect(d.origin).toBe("organico");
+    expect(d.reason).toBe("cadastro_apos_janela");
+    expect(d.verdicts).toEqual([
+      { touchId: 1, result: "perdeu", reason: "cadastro_apos_janela" },
+      { touchId: 2, result: "perdeu", reason: "cadastro_apos_janela" },
+    ]);
+  });
+
+  it("cadastro após o fim da janela vira orgânico, mesmo com toque válido no começo", () => {
+    const d = decideAttribution(base([touch(1, "campanha", T0 + DAY)], { signupAt: T0 + 60 * DAY }));
+    expect(d).toMatchObject({ origin: "organico", reason: "cadastro_apos_janela", winnerTouchId: null });
   });
 
   it("janela é medida do first_open_at e o limite é inclusivo", () => {
     const end = T0 + 7 * DAY;
-    const inside = decideAttribution(base([touch(1, "campanha", end)], { signupAt: end + MINUTE }));
-    const outside = decideAttribution(base([touch(1, "campanha", end + 1)], { signupAt: end + MINUTE }));
+    const inside = decideAttribution(base([touch(1, "campanha", end)], { signupAt: end }));
+    const outside = decideAttribution(base([touch(1, "campanha", end)], { signupAt: end + 1 }));
     expect(inside.origin).toBe("campanha");
     expect(inside.windowStart).toBe(T0);
     expect(inside.windowEnd).toBe(end);
     expect(outside.origin).toBe("organico");
-    expect(outside.reason).toBe("nenhum_toque_valido");
+    expect(outside.reason).toBe("cadastro_apos_janela");
   });
 
   it("toque posterior ao cadastro não vence", () => {
@@ -120,5 +129,28 @@ describe("decideAttribution", () => {
     const b = decideAttribution(base([...ts].reverse()));
     expect(a.winnerTouchId).toBe(b.winnerTouchId);
     expect(a.reason).toBe(b.reason);
+  });
+});
+
+describe("chooseFirstOpen", () => {
+  const limits = { maxFutureMs: 5 * MINUTE, maxAgeMs: 30 * DAY };
+  const now = T0 + 10 * DAY;
+
+  it("sem horário do aparelho, vale o do servidor", () => {
+    expect(chooseFirstOpen(null, now, limits)).toEqual({ at: now, source: "servidor" });
+  });
+
+  it("aparelho que abriu offline dias antes: vale o horário do aparelho", () => {
+    expect(chooseFirstOpen(T0, now, limits)).toEqual({ at: T0, source: "aparelho" });
+  });
+
+  it("aparelho levemente adiantado (dentro da tolerância): fonte aparelho, horário do servidor", () => {
+    expect(chooseFirstOpen(now + 4 * MINUTE, now, limits)).toEqual({ at: now, source: "aparelho" });
+  });
+
+  it("aparelho no futuro além da tolerância ou antigo demais: vale o servidor", () => {
+    expect(chooseFirstOpen(now + 6 * MINUTE, now, limits).source).toBe("servidor");
+    expect(chooseFirstOpen(now - 31 * DAY, now, limits).source).toBe("servidor");
+    expect(chooseFirstOpen(now - 30 * DAY, now, limits).source).toBe("aparelho");
   });
 });

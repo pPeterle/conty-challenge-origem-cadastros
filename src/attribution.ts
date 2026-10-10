@@ -15,10 +15,10 @@ export type TouchReason =
   | "perdeu_para_toque_mais_recente"
   | "empate_desfeito_por_prioridade"
   | "empate_desfeito_por_click_id"
-  | "fora_da_janela"
   | "posterior_ao_cadastro"
   | "anterior_a_primeira_abertura"
-  | "ja_usado_em_outro_cadastro";
+  | "ja_usado_em_outro_cadastro"
+  | "cadastro_apos_janela";
 
 export type OriginReason =
   | "toque_mais_recente_na_janela"
@@ -26,6 +26,7 @@ export type OriginReason =
   | "venceu_empate_por_click_id"
   | "sem_toques"
   | "nenhum_toque_valido"
+  | "cadastro_apos_janela"
   | "install_desconhecido";
 
 export interface TouchInput {
@@ -69,11 +70,12 @@ export function compareTouches(a: TouchInput, b: TouchInput): number {
   return a.clickId < b.clickId ? -1 : a.clickId > b.clickId ? 1 : 0;
 }
 
-function ineligibleReason(t: TouchInput, input: DecisionInput, windowEnd: number): TouchReason | null {
+// Não existe um motivo "fora_da_janela" por toque: se o cadastro está dentro da janela, todo
+// toque anterior ao cadastro também está; se não está, a regra de expiração acima já decidiu.
+function ineligibleReason(t: TouchInput, input: DecisionInput): TouchReason | null {
   if (t.usedBySignup) return "ja_usado_em_outro_cadastro";
   if (t.touchedAt > input.signupAt) return "posterior_ao_cadastro";
   if (t.touchedAt < input.firstOpenAt!) return "anterior_a_primeira_abertura";
-  if (t.touchedAt > windowEnd) return "fora_da_janela";
   return null;
 }
 
@@ -91,11 +93,24 @@ export function decideAttribution(input: DecisionInput): Decision {
 
   const windowStart = input.firstOpenAt;
   const windowEnd = input.firstOpenAt + input.windowMs;
+
+  // A origem expira: quem se cadastra depois do fim da janela é orgânico, mesmo
+  // que tenha aberto um link lá no começo.
+  if (input.signupAt > windowEnd) {
+    return {
+      origin: "organico",
+      winnerTouchId: null,
+      reason: "cadastro_apos_janela",
+      windowStart,
+      windowEnd,
+      verdicts: input.touches.map((t) => ({ touchId: t.id, result: "perdeu", reason: "cadastro_apos_janela" })),
+    };
+  }
   const verdicts = new Map<number, TouchVerdict>();
   const eligible: TouchInput[] = [];
 
   for (const t of input.touches) {
-    const reason = ineligibleReason(t, input, windowEnd);
+    const reason = ineligibleReason(t, input);
     if (reason) verdicts.set(t.id, { touchId: t.id, result: "perdeu", reason });
     else eligible.push(t);
   }
@@ -133,4 +148,31 @@ export function decideAttribution(input: DecisionInput): Decision {
     // Mantém a ordem de entrada para a auditoria ficar estável.
     verdicts: input.touches.map((t) => verdicts.get(t.id)!),
   };
+}
+
+export interface FirstOpenLimits {
+  /** Quanto o relógio do aparelho pode estar adiantado em relação ao servidor. */
+  maxFutureMs: number;
+  /** Até quando no passado aceitamos a primeira abertura informada pelo aparelho. */
+  maxAgeMs: number;
+}
+
+export type FirstOpenSource = "aparelho" | "servidor";
+
+/**
+ * Decide qual horário marca a primeira abertura. O do aparelho vale quando é
+ * plausível (cobre o app que abriu offline e só sincronizou depois); fora dos
+ * limites, vale o do servidor. Adiantado dentro da tolerância vira o horário do servidor,
+ * para nenhum toque ficar antes da primeira abertura.
+ */
+export function chooseFirstOpen(
+  deviceAt: number | null,
+  serverAt: number,
+  limits: FirstOpenLimits,
+): { at: number; source: FirstOpenSource } {
+  if (deviceAt === null) return { at: serverAt, source: "servidor" };
+  if (deviceAt > serverAt + limits.maxFutureMs || deviceAt < serverAt - limits.maxAgeMs) {
+    return { at: serverAt, source: "servidor" };
+  }
+  return { at: Math.min(deviceAt, serverAt), source: "aparelho" };
 }
