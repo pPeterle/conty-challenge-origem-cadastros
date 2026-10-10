@@ -183,7 +183,7 @@ Um cadastro sem link nenhum volta com `"origem": {"tipo": "organico", "motivo": 
 
 ## Validação e limites
 
-Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um schema zod em [`src/schemas.ts`](src/schemas.ts). Campos extras são ignorados, strings passam por `trim`, e datas exigem ISO 8601 com fuso. Erro de schema é recusado sem gravar nada. Link recusado (inválido, `cid` desconhecido, forjado ou de outro install) grava só a abertura recusada, para a auditoria.
+Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um schema zod em [`src/schemas.ts`](src/schemas.ts). Campos extras são ignorados, strings passam por `trim`, e datas exigem ISO 8601 com fuso entre -14:00 e +14:00 (`+24:00`, `+23:60` e `-15:00` são recusados). Erro de schema é recusado sem gravar nada. Link recusado (inválido, `cid` desconhecido, forjado ou de outro install) grava só a abertura recusada, para a auditoria.
 
 | situação | status | `error.code` |
 |---|---|---|
