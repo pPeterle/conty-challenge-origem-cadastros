@@ -74,7 +74,9 @@ Não há tolerância para toque antes da primeira abertura. O horário do toque 
 
 ### 3. O que o cadastro consome
 
-`POST /signups {user_id, install_id}` lê todos os toques do install, aplica a regra e grava, numa transação, a origem final e um veredito (`venceu`/`perdeu` + motivo) para cada toque considerado. Essa resposta é a auditoria, e `GET /signups/:user_id/attribution` devolve a mesma coisa depois.
+`POST /signups {user_id, install_id, signed_up_at?}` lê todos os toques do install, aplica a regra e grava, numa transação, a origem final e um veredito (`venceu`/`perdeu` + motivo) para cada toque considerado. Essa resposta é a auditoria, e `GET /signups/:user_id/attribution` devolve a mesma coisa depois.
+
+`signed_up_at` é opcional e vem do backend de contas, para o caso de a chamada chegar atrasada. Ele vira o instante do cadastro se for plausível: até 5 minutos à frente do servidor, não anterior à primeira abertura e com no máximo 30 dias. Fora disso, vale o horário em que a chamada chegou. A auditoria mostra os dois horários e a fonte usada (`signup_at_fonte`). Um link aberto entre o cadastro real e a chegada da chamada perde com `posterior_ao_cadastro`.
 
 ## Regras e onde elas vivem
 
@@ -82,10 +84,10 @@ A regra inteira está na função pura `decideAttribution`, em [`src/attribution
 
 1. A janela vai de `first_open_at` até `first_open_at + ATTRIBUTION_WINDOW_HOURS`, com o limite incluído. Cada cadastro grava a janela que usou, então mudar a configuração não reescreve o passado.
 2. Um cadastro feito depois do fim da janela é orgânico, com motivo `cadastro_apos_janela`, e todos os toques aparecem como perdedores com esse mesmo motivo. Daí sai a garantia de que um toque fora da janela nunca vence: se o cadastro está dentro da janela, todo toque anterior a ele também está.
-3. Toque com horário posterior ao cadastro perde com `posterior_ao_cadastro`. No mesmo milissegundo do cadastro, ainda conta.
+3. Toque com horário posterior ao cadastro perde com `posterior_ao_cadastro`. No mesmo milissegundo do cadastro, ainda conta. O instante do cadastro é o `signed_up_at` do backend quando plausível, senão o do servidor.
 4. Vence o toque válido mais recente (last touch).
 5. Em empate de horário, a ordem é `campanha > indicacao > comunidade`. Se a fonte também empata, vence o menor `click_id` em ordem lexical. O resultado nunca depende da ordem em que os toques foram lidos.
-6. `touches.click_id` é UNIQUE: o mesmo clique reenviado devolve o toque existente com `duplicado: true`. O mesmo `cid` com outra fonte ou outros parâmetros devolve 409 `click_divergente`. `signups.winning_touch_id` também é UNIQUE, então um segundo cadastro no mesmo aparelho não reaproveita o clique que já virou origem do primeiro (`ja_usado_em_outro_cadastro`). Um `cid` que já pertence a outro install devolve 409 `click_de_outro_install`, mas a abertura do segundo install fica registrada.
+6. `touches.click_id` é UNIQUE: o mesmo clique reenviado devolve o toque existente com `duplicado: true` e soma 1 em `vezes_recebido`, que aparece na auditoria. O mesmo `cid` com outra fonte ou outros parâmetros devolve 409 `click_divergente`. `signups.winning_touch_id` também é UNIQUE, então um segundo cadastro no mesmo aparelho não reaproveita o clique que já virou origem do primeiro (`ja_usado_em_outro_cadastro`). Um `cid` que já pertence a outro install devolve 409 `click_de_outro_install`, mas a abertura do segundo install fica registrada.
 7. Sem toque válido, a origem é `organico` e o motivo fica gravado: `sem_toques`, `so_toques_rejeitados` (só houve aberturas recusadas), `nenhum_toque_valido` (havia toques, mas todos já tinham sido usados), `cadastro_apos_janela` ou `install_desconhecido` (o `install_id` nunca passou pela API).
 8. O cadastro é idempotente. O mesmo `user_id` com o mesmo `install_id` devolve a decisão gravada (200), mesmo que tenham chegado toques novos. Com outro `install_id`, a resposta é 409.
 
@@ -109,15 +111,27 @@ Escolhi last touch porque o link mais recente antes do cadastro é o que estava 
 
 Empate exato de milissegundo é raro com horário do servidor, mas precisa ter resposta, senão o resultado dependeria da ordem de leitura do banco. A ordem `campanha > indicacao > comunidade` vai do link mais específico e mais caro de produzir para o mais difuso. Essa é uma decisão de produto: fica numa constante (`TIE_PRIORITY`) e aparece na resposta (`regra.desempate`). O `click_id` no fim existe só para o resultado ser determinístico.
 
+### Os testes pegam mudança na regra?
+
+Apliquei três mutações de verdade em `src/attribution.ts`, rodei `npm test` com cada uma e voltei o código:
+
+| mutação | testes que falharam (de 247) |
+|---|---|
+| desempate invertido (`comunidade > indicacao > campanha`) | 10, entre eles "empate de horário entre fontes diferentes...", "empate de horário: campanha vence indicação e comunidade...", as 6 ordens de chegada e o teste das 720 permutações |
+| limite da janela exclusivo (`signupAt > windowEnd` virando `>=`) | 2: "janela é medida do first_open_at e o limite é inclusivo" e "toque e cadastro no último milissegundo da janela ainda contam" |
+| first touch no lugar de last touch (ordem do horário invertida em `compareTouches`) | 6, entre eles os dois "dois links diferentes antes do cadastro...", "prioridade só desempata horário igual..." e "segundo cadastro no mesmo aparelho não reaproveita o clique..." |
+
 ## Modelo de dados
 
 ```
 clicks          (click_id PK, source, params JSON, clicked_at)          gravado pelo GET /l
 installs        (install_id PK, first_open_at, first_open_source,
                  server_first_open_at, device_first_open_at)
-touches         (id PK, click_id UNIQUE -> clicks, install_id, source, params JSON, touched_at, client_opened_at)
+touches         (id PK, click_id UNIQUE -> clicks, install_id, source, params JSON, touched_at, client_opened_at,
+                 times_received)
 rejected_touches (id PK, install_id, click_id, url, reason, received_at, client_opened_at)
-signups         (user_id PK, install_id, signup_at, first_open_at, first_open_source, window_ms,
+signups         (user_id PK, install_id, signup_at, signup_at_source, server_signup_at, backend_signed_up_at,
+                 first_open_at, first_open_source, window_ms,
                  rule_version, last_rejected_id, origin, reason, winning_touch_id UNIQUE NULL)
 signup_touches  (user_id, touch_id, result, reason)  PK (user_id, touch_id)
 ```
@@ -138,25 +152,29 @@ stateDiagram-v2
 
 ## Exemplo real, do clique à auditoria
 
-Numa sessão real, o aparelho `inst_8f2c` abriu pelo link de campanha, recebeu uma URL forjada (fonte trocada) e uma com `cid` inventado, depois abriu pelo link de indicação e se cadastrou. O link de comunidade verdadeiro chegou depois do cadastro. Os `curl` de cada passo, com as respostas, estão em [`docs/exemplo-completo.md`](docs/exemplo-completo.md). A auditoria ficou assim (`GET /signups/u_ana/attribution`):
+Numa sessão real, o aparelho `inst_8f2c` abriu pelo link de campanha (duas vezes), recebeu uma URL forjada (fonte trocada) e uma com `cid` inventado e depois abriu pelo link de indicação. O cadastro aconteceu no backend logo em seguida, mas a chamada chegou aqui só depois de um link de comunidade ser aberto. Por último chegou um link de campanha que o aparelho diz ter aberto antes do cadastro. Os `curl` de cada passo, com as respostas, estão em [`docs/exemplo-completo.md`](docs/exemplo-completo.md). A auditoria ficou assim (`GET /signups/u_ana/attribution`):
 
 ```json
 {
   "user_id": "u_ana",
   "install_id": "inst_8f2c",
-  "signup_at": "2026-10-10T04:20:05.734Z",
-  "origem": {"tipo": "indicacao", "motivo": "toque_mais_recente_na_janela", "click_id": "clk_59dba3ea274840f8b4a0462322e4afa7", "params": {"ref": "MARIA2026"}},
-  "regra": {"nome": "last_touch", "versao": "last_touch_v1", "janela_horas": 168, "janela_inicio": "2026-10-10T02:20:04.000Z", "janela_inicio_fonte": "aparelho", "janela_fim": "2026-10-17T02:20:04.000Z", "desempate": ["campanha", "indicacao", "comunidade", "click_id"]},
+  "signup_at": "2026-10-10T13:04:39.500Z",
+  "signup_at_fonte": "backend",
+  "signup_recebido_em": "2026-10-10T13:04:41.052Z",
+  "signed_up_at_backend": "2026-10-10T13:04:39.500Z",
+  "origem": {"tipo": "indicacao", "motivo": "toque_mais_recente_na_janela", "click_id": "clk_b23a7c34179043c88a7af1413493a4b4", "params": {"ref": "MARIA2026"}},
+  "regra": {"nome": "last_touch", "versao": "last_touch_v1", "janela_horas": 168, "janela_inicio": "2026-10-10T11:04:37.000Z", "janela_inicio_fonte": "aparelho", "janela_fim": "2026-10-17T11:04:37.000Z", "desempate": ["campanha", "indicacao", "comunidade", "click_id"]},
   "toques_considerados": [
-    {"click_id": "clk_fb736b081a8b42b39e65e7850f660e90", "source": "campanha", "params": {"cmp": "cmp_123", "ch": "instagram"}, "clicked_at": "2026-10-10T04:19:46.487Z", "touched_at": "2026-10-10T04:20:04.649Z", "client_opened_at": null, "resultado": "perdeu", "motivo": "perdeu_para_toque_mais_recente"},
-    {"click_id": "clk_59dba3ea274840f8b4a0462322e4afa7", "source": "indicacao", "params": {"ref": "MARIA2026"}, "clicked_at": "2026-10-10T04:19:46.509Z", "touched_at": "2026-10-10T04:20:05.716Z", "client_opened_at": null, "resultado": "venceu", "motivo": "toque_mais_recente_na_janela"}
+    {"click_id": "clk_52aa11d3c29f484fa4b96c65557332e7", "source": "campanha", "params": {"cmp": "cmp_123", "ch": "instagram"}, "clicked_at": "2026-10-10T13:04:37.741Z", "touched_at": "2026-10-10T13:04:37.870Z", "client_opened_at": null, "vezes_recebido": 2, "resultado": "perdeu", "motivo": "perdeu_para_toque_mais_recente"},
+    {"click_id": "clk_b23a7c34179043c88a7af1413493a4b4", "source": "indicacao", "params": {"ref": "MARIA2026"}, "clicked_at": "2026-10-10T13:04:37.776Z", "touched_at": "2026-10-10T13:04:38.957Z", "client_opened_at": null, "vezes_recebido": 1, "resultado": "venceu", "motivo": "toque_mais_recente_na_janela"},
+    {"click_id": "clk_815d8d5858294e2fb87e71f219fea242", "source": "comunidade", "params": {"com": "grupo_ugc"}, "clicked_at": "2026-10-10T13:04:37.798Z", "touched_at": "2026-10-10T13:04:40.526Z", "client_opened_at": null, "vezes_recebido": 1, "resultado": "perdeu", "motivo": "posterior_ao_cadastro"}
   ],
   "toques_rejeitados": [
-    {"click_id": "clk_f067b20f830f470e955dedb599aaa616", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_f067b20f830f470e955dedb599aaa616", "received_at": "2026-10-10T04:20:04.676Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_divergente"},
-    {"click_id": "clk_inventado_123", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_inventado_123", "received_at": "2026-10-10T04:20:04.689Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_desconhecido"}
+    {"click_id": "clk_815d8d5858294e2fb87e71f219fea242", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_815d8d5858294e2fb87e71f219fea242", "received_at": "2026-10-10T13:04:37.913Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_divergente"},
+    {"click_id": "clk_inventado_123", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_inventado_123", "received_at": "2026-10-10T13:04:37.933Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_desconhecido"}
   ],
   "toques_apos_cadastro": [
-    {"click_id": "clk_f067b20f830f470e955dedb599aaa616", "source": "comunidade", "params": {"com": "grupo_ugc"}, "clicked_at": "2026-10-10T04:19:46.535Z", "touched_at": "2026-10-10T04:20:05.765Z", "client_opened_at": "2026-10-10T04:19:05.000Z", "resultado": "perdeu", "motivo": "posterior_ao_cadastro", "relogio_diverge": true}
+    {"click_id": "clk_61ac6e0f1e06498ebe3664e4cc06ebe4", "source": "campanha", "params": {"cmp": "cmp_456"}, "clicked_at": "2026-10-10T13:04:37.815Z", "touched_at": "2026-10-10T13:04:41.609Z", "client_opened_at": "2026-10-10T13:03:41.085Z", "vezes_recebido": 1, "resultado": "perdeu", "motivo": "posterior_ao_cadastro", "relogio_diverge": true}
   ]
 }
 ```
@@ -196,6 +214,8 @@ $ curl -s localhost:3104/touches -H 'content-type: application/json' \
 | empate de horário | `api.test.ts`: "empate de horário: campanha vence indicação e comunidade..."; `attribution.test.ts`: empate por prioridade e por click_id |
 | o mesmo clique não cria duas origens | `api.test.ts`: "o mesmo clique reenviado não cria segundo toque nem segunda origem"; `concurrency.test.ts`: "50 envios concorrentes do mesmo clique geram um toque só" |
 | toque fora da janela não vence | `api.test.ts`: "toque fora da janela (medida do first_open_at) não vence..." e "cadastro após o fim da janela vira orgânico" |
+| cadastro atrasado com link aberto no meio | `api.test.ts`: "cadastro que chega atrasado com link aberto no meio: vale o signed_up_at e o link do meio não vence" |
+| reenvios contados | `api.test.ts`: "reenvios do mesmo clique são contados em vezes_recebido..." |
 | janela a partir da primeira abertura | `api.test.ts`: "app que abriu offline: a janela conta do first_open_at informado pelo aparelho"; `attribution.test.ts`: `chooseFirstOpen` |
 | toque posterior ao cadastro não vence | `api.test.ts`: "toque posterior ao cadastro é registrado..." e "...relogio_diverge, sem mudar a origem" |
 | orgânico com motivo | `api.test.ts`: "cadastro sem toque fica orgânico com motivo sem_toques gravado", "install nunca visto..." |
@@ -215,14 +235,14 @@ Estou supondo que, mesmo num pico de campanha, o volume fique na casa de dezenas
 
 ## Teste de carga
 
-`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real de 2026-10-10 nesta máquina (macOS, load average em torno de 4):
+`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real de 2026-10-10 nesta máquina (macOS, load average em torno de 11, com outros processos rodando):
 
 ```
-checks.........................: 100.00% 9196 out of 9196
-http_req_duration..............: avg=22.28ms med=15.95ms p(90)=34.38ms p(95)=40.37ms max=1.14s
-http_req_failed................: 0.00%   0 out of 22696
-http_reqs......................: 22696   5777.785502/s
-iterations.....................: 2000    509.145709/s
+checks.........................: 100.00% 9208 out of 9208
+http_req_duration..............: avg=20.62ms med=14.46ms p(90)=31.87ms p(95)=38.88ms max=1.01s
+http_req_failed................: 0.00%   0 out of 22708
+http_reqs......................: 22708   6158.660034/s
+iterations.....................: 2000    542.422057/s
 
 cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500

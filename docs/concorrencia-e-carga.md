@@ -31,7 +31,8 @@ Os checks do k6 conferem que cada lote de reenvios teve exatamente um 201 e o re
 - um toque como origem de dois cadastros;
 - origem diferente da esperada;
 - auditoria gravada que não bate com `decideAttribution` recalculada sobre o mesmo retrato;
-- toque posterior ao cadastro que entrou na decisão.
+- toque posterior ao cadastro que entrou na decisão;
+- toque com `vezes_recebido` menor que o número de reenvios do cenário.
 
 ## 50 VUs e o backlog do macOS
 
@@ -44,14 +45,14 @@ Duas mudanças no script de carga resolveram:
 
 ## Resultado
 
-Execução real de 2026-10-10 nesta máquina (macOS com OrbStack), com a versão final (clique gravado, aberturas recusadas, zod) e load average em torno de 4:
+Execução real de 2026-10-10 nesta máquina (macOS com OrbStack), com a versão final (clique gravado, aberturas recusadas, zod, signed_up_at, vezes_recebido) e load average em torno de 11:
 
 ```
-checks.........................: 100.00% 9196 out of 9196
-http_req_duration..............: avg=22.28ms med=15.95ms p(90)=34.38ms p(95)=40.37ms max=1.14s
-http_req_failed................: 0.00%   0 out of 22696
-http_reqs......................: 22696   5777.785502/s
-iterations.....................: 2000    509.145709/s
+checks.........................: 100.00% 9208 out of 9208
+http_req_duration..............: avg=20.62ms med=14.46ms p(90)=31.87ms p(95)=38.88ms max=1.01s
+http_req_failed................: 0.00%   0 out of 22708
+http_reqs......................: 22708   6158.660034/s
+iterations.....................: 2000    542.422057/s
 
 cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500
