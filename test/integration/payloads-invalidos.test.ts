@@ -52,6 +52,14 @@ const badTouchFields: [string, Record<string, unknown>][] = [
   ["opened_at objeto", { install_id: "inst_1", url: VALID_URL, opened_at: { at: "2026-03-01T12:00:00Z" } }],
 ];
 
+// Passam no datetime({ offset: true }) do zod, mas não são um instante de verdade.
+const impossibleDates = [
+  "2026-03-01T12:00:00+24:00",
+  "2026-03-01T12:00:00+99:00",
+  "2026-03-01T12:00:00+23:60",
+  "2026-03-01T12:00:00-15:00",
+];
+
 // Corpo válido, link recusado: só a abertura recusada fica registrada, para auditoria.
 const badTouchLinks: [string, Record<string, unknown>][] = [
   ["url sem protocolo", { install_id: "inst_1", url: "conty.app/abrir?src=campanha&cmp=x&cid=clk_aaaa0001" }],
@@ -145,6 +153,32 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
       error: { code: "validacao", details: [{ campo: "install_id", motivo: "esperado texto, veio número" }] },
     });
   });
+});
+
+describe("datas com fuso impossível", () => {
+  it.each(impossibleDates)("first_open_at %s em POST /installs devolve 400, não 500", async (value) => {
+    const { post, db } = setup();
+    const res = await post("/installs", { install_id: "inst_1", first_open_at: value });
+    await expectError(res.clone(), 400);
+    expect(((await res.json()) as { error: { details: { campo: string }[] } }).error.details[0]?.campo).toBe("first_open_at");
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it.each(impossibleDates)("opened_at %s em POST /touches devolve 400, não 500", async (value) => {
+    const { post, db, click } = setup();
+    const res = await post("/touches", { install_id: "inst_1", url: click(VALID_URL), opened_at: value });
+    await expectError(res, 400);
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it.each(["2026-03-01T12:00:00+14:00", "2026-03-01T12:00:00-12:00", "2026-03-01T12:00:00+05:45", "2026-03-01T12:00:00.123456Z"])(
+    "fuso real %s continua aceito",
+    async (value) => {
+      const { post, click } = setup();
+      const res = await post("/touches", { install_id: "inst_1", url: click(VALID_URL), opened_at: value });
+      expect(res.status).toBe(201);
+    },
+  );
 });
 
 describe("payloads inválidos em POST /touches", () => {

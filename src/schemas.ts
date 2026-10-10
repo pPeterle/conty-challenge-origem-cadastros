@@ -50,10 +50,40 @@ export const idSchema = z
   .max(128, "até 128 caracteres")
   .regex(ID_RE, "use só letras, números, _ ou -");
 
+const ISO_PARTS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|([+-])(\d{2}):?(\d{2}))$/i;
+const MAX_OFFSET_MINUTES = 14 * 60; // o maior fuso em uso é +14:00
+
+/**
+ * O `datetime({ offset: true })` do zod aceita fuso impossível (+24:00, +23:60), que vira NaN
+ * no Date.parse. Aqui o texto precisa virar um instante e voltar para os mesmos campos.
+ */
+export function isRealInstant(value: string): boolean {
+  const m = ISO_PARTS_RE.exec(value);
+  if (!m) return false;
+  const [, y, mo, d, h, mi, sec = "00", zone, sign, oh = "00", om = "00"] = m;
+  const offsetMinutes = zone.toUpperCase() === "Z" ? 0 : (sign === "-" ? -1 : 1) * (Number(oh) * 60 + Number(om));
+  if (Number(om) > 59 || Math.abs(offsetMinutes) > MAX_OFFSET_MINUTES) return false;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return false;
+  // Ida e volta: o instante, deslocado para o fuso informado, tem de repetir data e hora escritas.
+  const local = new Date(ms + offsetMinutes * 60_000);
+  return (
+    local.getUTCFullYear() === Number(y) &&
+    local.getUTCMonth() + 1 === Number(mo) &&
+    local.getUTCDate() === Number(d) &&
+    local.getUTCHours() === Number(h) &&
+    local.getUTCMinutes() === Number(mi) &&
+    local.getUTCSeconds() === Number(sec)
+  );
+}
+
+const ISO_MESSAGE = "data ISO 8601 com fuso, ex. 2026-03-01T12:00:00.000Z";
+
 export const isoDateTimeSchema = z
   .string()
   .trim()
-  .datetime({ offset: true, message: "data ISO 8601 com fuso, ex. 2026-03-01T12:00:00.000Z" });
+  .datetime({ offset: true, message: ISO_MESSAGE })
+  .refine(isRealInstant, { message: `${ISO_MESSAGE} (data, hora ou fuso impossível)` });
 
 const linkValue = z.string().trim().regex(VALUE_RE, "até 64 caracteres: letras, números, _, . ou -");
 
