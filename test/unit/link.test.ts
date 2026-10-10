@@ -48,3 +48,16 @@ describe("contrato do link", () => {
     expect(parseAppLink("http://conty.app/abrir?src=campanha&cmp=x&cid=clk_eeee0001", BASE)).toMatchObject({ ok: false });
   });
 });
+
+describe("query com chaves do protótipo", () => {
+  it.each(["__proto__=x", "__proto__=x&__proto__=y", "constructor=x", "toString=x"])(
+    "%s é tratada como chave desconhecida e não muda o resultado",
+    (extra) => {
+      const base = q("src=campanha&cmp=cmp_123&ch=instagram");
+      const comExtra = q(`src=campanha&cmp=cmp_123&ch=instagram&${extra}`);
+      expect(base.success).toBe(true);
+      expect(comExtra.success).toBe(true);
+      expect(comExtra.data).toEqual(base.data);
+    },
+  );
+});

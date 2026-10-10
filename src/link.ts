@@ -8,7 +8,8 @@ export type ParseResult<T> = { ok: true; value: T } | { ok: false; message: stri
 
 /** Igual ao que o validador do Hono faz com a query: chave repetida vira lista (e é recusada). */
 export function queryToObject(query: URLSearchParams): Record<string, string | string[]> {
-  const out: Record<string, string | string[]> = {};
+  // Sem protótipo: uma chave "__proto__" na query vira só mais uma chave desconhecida.
+  const out: Record<string, string | string[]> = Object.create(null);
   for (const key of new Set(query.keys())) {
     const all = query.getAll(key);
     out[key] = all.length === 1 ? all[0]! : all;
