@@ -45,14 +45,14 @@ Duas mudanças no script de carga resolveram:
 
 ## Resultado
 
-Execução real de 2026-10-10 nesta máquina (macOS com OrbStack), com a versão final (clique gravado, aberturas recusadas, zod, signed_up_at, vezes_recebido) e load average em torno de 11:
+Execução real de 2026-10-10 nesta máquina (macOS com OrbStack), com a versão final (clique gravado, aberturas recusadas, zod, signed_up_at, vezes_recebido, log com pino) e load average em torno de 8:
 
 ```
-checks.........................: 100.00% 9208 out of 9208
-http_req_duration..............: avg=20.62ms med=14.46ms p(90)=31.87ms p(95)=38.88ms max=1.01s
-http_req_failed................: 0.00%   0 out of 22708
-http_reqs......................: 22708   6158.660034/s
-iterations.....................: 2000    542.422057/s
+checks.........................: 100.00% 9175 out of 9175
+http_req_duration..............: avg=25.34ms med=17.23ms p(90)=37.32ms p(95)=44.21ms max=1.53s
+http_req_failed................: 0.00%   0 out of 22675
+http_reqs......................: 22675   5211.881408/s
+iterations.....................: 2000    459.70288/s
 
 cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500

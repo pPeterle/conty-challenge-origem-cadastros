@@ -20,6 +20,7 @@ npm run load         # precisa de Docker; sobe a API na porta 3104 com banco tem
 | `DB_PATH` | `origem.db` | arquivo sqlite |
 | `ATTRIBUTION_WINDOW_HOURS` | `168` (7 dias) | janela de validade, contada a partir da primeira abertura do app |
 | `APP_LINK_BASE` | `https://conty.app/abrir` | endereço que abre o app (universal link / app link) |
+| `LOG_LEVEL` | `info` | nível do log (JSON pelo pino, com transporte em worker thread; nos testes o logger é silencioso) |
 
 ## O contrato
 
@@ -196,7 +197,7 @@ Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um sc
 | content-type diferente de `application/json` | 400 | `content_type_invalido` |
 | corpo acima de 16 KB | 413 | `corpo_grande_demais` |
 | rota ou método inexistente, cadastro inexistente | 404 | `rota_nao_encontrada` / `cadastro_nao_encontrado` |
-| erro inesperado | 500 | `erro_interno` (sem stack trace; o erro vai para o log) |
+| erro inesperado | 500 | `erro_interno` (sem stack trace; o erro vai para o log do pino) |
 
 Exemplo real:
 
@@ -235,14 +236,14 @@ Estou supondo que, mesmo num pico de campanha, o volume fique na casa de dezenas
 
 ## Teste de carga
 
-`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real de 2026-10-10 nesta máquina (macOS, load average em torno de 11, com outros processos rodando):
+`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real de 2026-10-10 nesta máquina (macOS, load average em torno de 8, com outros processos rodando):
 
 ```
-checks.........................: 100.00% 9208 out of 9208
-http_req_duration..............: avg=20.62ms med=14.46ms p(90)=31.87ms p(95)=38.88ms max=1.01s
-http_req_failed................: 0.00%   0 out of 22708
-http_reqs......................: 22708   6158.660034/s
-iterations.....................: 2000    542.422057/s
+checks.........................: 100.00% 9175 out of 9175
+http_req_duration..............: avg=25.34ms med=17.23ms p(90)=37.32ms p(95)=44.21ms max=1.53s
+http_req_failed................: 0.00%   0 out of 22675
+http_reqs......................: 22675   5211.881408/s
+iterations.....................: 2000    459.70288/s
 
 cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500

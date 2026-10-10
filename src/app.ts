@@ -9,6 +9,7 @@ import type { Clock } from "./clock.ts";
 import type { AttributionConfig } from "./config.ts";
 import { RULE_VERSION, TIE_PRIORITY, chooseSignupAt, decideAttribution } from "./attribution.ts";
 import { buildAppLink, describe, parseAppLink } from "./link.ts";
+import { silentLogger, type Logger } from "./logger.ts";
 import {
   installBodySchema,
   issueDetails,
@@ -44,6 +45,8 @@ export interface AppDeps {
   clock: Clock;
   config: AttributionConfig;
   newClickId?: () => string;
+  /** Padrão: logger silencioso (testes). O servidor passa o de `createLogger`. */
+  logger?: Logger;
 }
 
 // Os corpos desta API têm poucas centenas de bytes; 16 KB já é folga de sobra.
@@ -157,12 +160,13 @@ export function createApp(deps: AppDeps) {
   const { db, clock, config } = deps;
   const newClickId = deps.newClickId ?? (() => `clk_${randomUUID().replaceAll("-", "")}`);
   const app = new Hono();
+  const logger = deps.logger ?? silentLogger;
 
   app.onError((err, c) => {
     if (err instanceof HTTPException && err.status === 400) {
       return fail(c, 400, "corpo_invalido", "corpo precisa ser JSON válido");
     }
-    console.error(err);
+    logger.error({ err, method: c.req.method, path: c.req.path }, "erro inesperado");
     return fail(c, 500, "erro_interno", "erro inesperado");
   });
   app.notFound((c) => fail(c, 404, "rota_nao_encontrada", "rota não encontrada"));

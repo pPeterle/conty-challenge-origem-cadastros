@@ -3,10 +3,11 @@ import { DAY, FixedClock } from "../../src/clock.ts";
 import { getClick, insertClick, openDb } from "../../src/db.ts";
 import { parseAppLink } from "../../src/link.ts";
 import { DEFAULT_FIRST_OPEN_LIMITS } from "../../src/config.ts";
+import type { Logger } from "../../src/logger.ts";
 
 export const START = "2026-03-01T12:00:00.000Z";
 
-export function setup(opts: { windowMs?: number } = {}) {
+export function setup(opts: { windowMs?: number; logger?: Logger } = {}) {
   const db = openDb(":memory:");
   const clock = new FixedClock(START);
   let n = 0;
@@ -15,6 +16,7 @@ export function setup(opts: { windowMs?: number } = {}) {
     clock,
     config: { windowMs: opts.windowMs ?? 7 * DAY, appLinkBase: "https://conty.app/abrir", firstOpen: DEFAULT_FIRST_OPEN_LIMITS },
     newClickId: () => `clk_test${String(++n).padStart(4, "0")}`,
+    logger: opts.logger,
   });
   const post = (path: string, body: unknown) =>
     app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
