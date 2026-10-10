@@ -112,6 +112,12 @@ describe("decideAttribution", () => {
     expect(d).toMatchObject({ origin: "organico", winnerTouchId: null, reason: "sem_toques", verdicts: [] });
   });
 
+  it("só toques rejeitados: orgânico com motivo so_toques_rejeitados", () => {
+    expect(decideAttribution(base([], { rejectedCount: 2 }))).toMatchObject({ origin: "organico", reason: "so_toques_rejeitados" });
+    expect(decideAttribution(base([], { firstOpenAt: null, rejectedCount: 1 })).reason).toBe("so_toques_rejeitados");
+    expect(decideAttribution(base([touch(1, "campanha", T0 + HOUR)], { rejectedCount: 5 })).origin).toBe("campanha");
+  });
+
   it("install desconhecido: orgânico com motivo install_desconhecido", () => {
     const d = decideAttribution(base([], { firstOpenAt: null }));
     expect(d).toMatchObject({ origin: "organico", reason: "install_desconhecido", windowStart: null });

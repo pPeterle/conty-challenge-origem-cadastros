@@ -35,20 +35,12 @@ const badIds: [string, unknown][] = [
   ["null", null],
 ];
 
+// Recusados pelo schema do corpo: nada é gravado.
 const badTouchFields: [string, Record<string, unknown>][] = [
   ["url ausente", { install_id: "inst_1" }],
   ["url número", { install_id: "inst_1", url: 1 }],
   ["url vazia", { install_id: "inst_1", url: "" }],
-  ["url sem protocolo", { install_id: "inst_1", url: "conty.app/abrir?src=campanha&cmp=x&cid=clk_aaaa0001" }],
-  ["url javascript:", { install_id: "inst_1", url: "javascript:alert(1)//?src=campanha&cmp=x&cid=clk_aaaa0001" }],
   ["url gigante", { install_id: "inst_1", url: `${VALID_URL}&x=${"a".repeat(2100)}` }],
-  ["src desconhecido", { install_id: "inst_1", url: "https://conty.app/abrir?src=google&cid=clk_aaaa0001" }],
-  ["src repetido", { install_id: "inst_1", url: `${VALID_URL}&src=indicacao` }],
-  ["cid repetido", { install_id: "inst_1", url: `${VALID_URL}&cid=clk_bbbb0002` }],
-  ["cid curto", { install_id: "inst_1", url: campaignLink("clk") }],
-  ["cid com espaço", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=x&cid=clk%20aaaa0001" }],
-  ["parâmetro obrigatório ausente", { install_id: "inst_1", url: "https://conty.app/abrir?src=indicacao&cid=clk_aaaa0001" }],
-  ["valor com caractere proibido", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=%3Cscript%3E&cid=clk_aaaa0001" }],
   ["opened_at inválido", { install_id: "inst_1", url: VALID_URL, opened_at: "ontem" }],
   ["opened_at sem fuso", { install_id: "inst_1", url: VALID_URL, opened_at: "2026-03-01T12:00:00" }],
   ["opened_at só data", { install_id: "inst_1", url: VALID_URL, opened_at: "2026-03-01" }],
@@ -56,10 +48,23 @@ const badTouchFields: [string, Record<string, unknown>][] = [
   ["opened_at \"1\"", { install_id: "inst_1", url: VALID_URL, opened_at: "1" }],
   ["opened_at \"March 1\"", { install_id: "inst_1", url: VALID_URL, opened_at: "March 1" }],
   ["opened_at RFC 2822", { install_id: "inst_1", url: VALID_URL, opened_at: "Tue, 01 Mar 2026 12:00:00 GMT" }],
-  ["url de outro host", { install_id: "inst_1", url: "https://evil.example/abrir?src=campanha&cmp=x&cid=clk_eeee0001" }],
-  ["url de outro caminho", { install_id: "inst_1", url: "https://conty.app/qualquer?src=campanha&cmp=x&cid=clk_eeee0001" }],
   ["opened_at número", { install_id: "inst_1", url: VALID_URL, opened_at: 1772366400000 }],
   ["opened_at objeto", { install_id: "inst_1", url: VALID_URL, opened_at: { at: "2026-03-01T12:00:00Z" } }],
+];
+
+// Corpo válido, link recusado: só a abertura recusada fica registrada, para auditoria.
+const badTouchLinks: [string, Record<string, unknown>][] = [
+  ["url sem protocolo", { install_id: "inst_1", url: "conty.app/abrir?src=campanha&cmp=x&cid=clk_aaaa0001" }],
+  ["url javascript:", { install_id: "inst_1", url: "javascript:alert(1)//?src=campanha&cmp=x&cid=clk_aaaa0001" }],
+  ["src desconhecido", { install_id: "inst_1", url: "https://conty.app/abrir?src=google&cid=clk_aaaa0001" }],
+  ["src repetido", { install_id: "inst_1", url: `${VALID_URL}&src=indicacao` }],
+  ["cid repetido", { install_id: "inst_1", url: `${VALID_URL}&cid=clk_bbbb0002` }],
+  ["cid curto", { install_id: "inst_1", url: campaignLink("clk") }],
+  ["cid com espaço", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=x&cid=clk%20aaaa0001" }],
+  ["parâmetro obrigatório ausente", { install_id: "inst_1", url: "https://conty.app/abrir?src=indicacao&cid=clk_aaaa0001" }],
+  ["valor com caractere proibido", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=%3Cscript%3E&cid=clk_aaaa0001" }],
+  ["url de outro host", { install_id: "inst_1", url: "https://evil.example/abrir?src=campanha&cmp=x&cid=clk_eeee0001" }],
+  ["url de outro caminho", { install_id: "inst_1", url: "https://conty.app/qualquer?src=campanha&cmp=x&cid=clk_eeee0001" }],
 ];
 
 const routes = [
@@ -73,7 +78,7 @@ function raw(app: ReturnType<typeof setup>["app"], path: string, body: string | 
 }
 
 function tableCounts(db: ReturnType<typeof setup>["db"]) {
-  return ["installs", "touches", "signups", "signup_touches"].map(
+  return ["installs", "touches", "signups", "signup_touches", "rejected_touches"].map(
     (t) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n,
   );
 }
@@ -90,14 +95,14 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
   it.each(malformed)("%s devolve 400 e não grava nada", async (_nome, corpo) => {
     const { click, app, db } = setup();
     await expectError(await raw(app, path, corpo), 400);
-    expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
   });
 
   for (const field of idFields) {
     it.each(badIds)(`${field} %s devolve 400 e não grava nada`, async (_nome, value) => {
       const { click, post, db } = setup();
       await expectError(await post(path, { ...valid, [field]: value }), 400);
-      expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
+      expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
     });
   }
 
@@ -106,7 +111,7 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
     const big = JSON.stringify({ ...valid, lixo: "x".repeat(MAX_BODY_BYTES) });
     const res = await raw(app, path, big);
     await expectError(res, 413);
-    expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
   });
 
   it("campos extras desconhecidos são ignorados", async () => {
@@ -123,7 +128,7 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
       const res = await raw(app, path, JSON.stringify(valid), type);
       await expectError(res, 400);
       expect(((await app.request(path, { method: "POST", body: JSON.stringify(valid) })).status)).toBe(400);
-      expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
+      expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
     },
   );
 
@@ -143,10 +148,18 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
 });
 
 describe("payloads inválidos em POST /touches", () => {
+  it.each(badTouchLinks)("%s devolve 400 link_invalido e só registra a abertura recusada", async (_nome, body) => {
+    const { post, db } = setup();
+    const res = await post("/touches", body);
+    await expectError(res.clone(), 400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("link_invalido");
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 1]);
+  });
+
   it.each(badTouchFields)("%s devolve 400 e não grava nada", async (_nome, body) => {
     const { click, post, db } = setup();
     await expectError(await post("/touches", body), 400);
-    expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
+    expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
   });
 
   it("opened_at com fuso diferente de Z é aceito e normalizado para UTC", async () => {

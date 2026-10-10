@@ -26,11 +26,15 @@ import {
   insertClick,
   getSignup,
   insertSignup,
+  insertRejected,
   insertTouch,
+  lastRejectedId,
+  rejectedForSignup,
   touchesAfterSignup,
   touchesForInstall,
   transaction,
   type Db,
+  type RejectionReason,
   type SignupRow,
   type TouchRow,
 } from "./db.ts";
@@ -71,6 +75,15 @@ const requireJson: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
+function cidFromUrl(url: string): string | null {
+  try {
+    const cid = new URL(url).searchParams.get("cid");
+    return cid && cid.length <= 64 ? cid : null;
+  } catch {
+    return null;
+  }
+}
+
 function touchView(t: TouchRow) {
   return {
     click_id: t.click_id,
@@ -105,6 +118,15 @@ function attributionView(db: Db, s: SignupRow) {
       desempate: [...TIE_PRIORITY, "click_id"],
     },
     toques_considerados: audit.map((t) => ({ ...touchView(t), resultado: t.result, motivo: t.reason })),
+    // Aberturas por link recusadas antes do cadastro (url inválida, cid desconhecido ou forjado).
+    toques_rejeitados: rejectedForSignup(db, s).map((r) => ({
+      click_id: r.click_id,
+      url: r.url,
+      received_at: iso(r.received_at),
+      client_opened_at: r.client_opened_at,
+      resultado: "rejeitado",
+      motivo: r.reason,
+    })),
     // Registrados depois da decisão: ficam visíveis, mas a origem não muda.
     toques_apos_cadastro: touchesAfterSignup(db, s.user_id, s.install_id).map((t) => ({
       ...touchView(t),
@@ -171,18 +193,25 @@ export function createApp(deps: AppDeps) {
   // Toque: o app abriu por um link. O horário que vale é o do servidor.
   app.post("/touches", requireJson, validate("json", touchBodySchema), (c) => {
     const body = c.req.valid("json");
+    const now = clock.now().getTime();
+    const clientOpenedAt = body.opened_at ? new Date(body.opened_at).toISOString() : null;
+    // A abertura recusada fica registrada para a auditoria do cadastro; nunca vira origem.
+    const reject = (status: ContentfulStatusCode, reason: RejectionReason, message: string, clickId: string | null, details?: IssueDetail[]) => {
+      insertRejected(db, { installId: body.install_id, clickId, url: body.url, reason, receivedAt: now, clientOpenedAt });
+      return fail(c, status, reason, message, details);
+    };
+
     const link = parseAppLink(body.url, config.appLinkBase);
-    if (!link.ok) return fail(c, 400, "link_invalido", link.message, link.details);
+    if (!link.ok) return reject(400, "link_invalido", link.message, cidFromUrl(body.url), link.details);
 
     const click = getClick(db, link.value.clickId);
     if (!click) {
-      return fail(c, 400, "click_desconhecido", "esse cid não foi emitido pelo redirecionador (GET /l)");
+      return reject(400, "click_desconhecido", "esse cid não foi emitido pelo redirecionador (GET /l)", link.value.clickId);
     }
     if (click.source !== link.value.source || click.params !== JSON.stringify(link.value.params)) {
-      return fail(c, 409, "click_divergente", "fonte ou parâmetros da url não batem com o clique gravado");
+      return reject(409, "click_divergente", "fonte ou parâmetros da url não batem com o clique gravado", link.value.clickId);
     }
 
-    const now = clock.now().getTime();
     const outcome = transaction(db, () => {
       // Se o toque chega antes do registro de primeira abertura, ele mesmo registra.
       ensureInstall(db, body.install_id, now, null, config.firstOpen);
@@ -192,12 +221,12 @@ export function createApp(deps: AppDeps) {
         source: click.source,
         params: JSON.parse(click.params) as Record<string, string>,
         touchedAt: now,
-        clientOpenedAt: body.opened_at ? new Date(body.opened_at).toISOString() : null,
+        clientOpenedAt,
       });
     });
 
     if (outcome.touch.install_id !== body.install_id) {
-      return fail(c, 409, "click_de_outro_install", "esse click_id já foi registrado por outro install");
+      return reject(409, "click_de_outro_install", "esse click_id já foi registrado por outro install", link.value.clickId);
     }
     return c.json(
       { install_id: body.install_id, ...touchView(outcome.touch), duplicado: !outcome.created },
@@ -215,7 +244,9 @@ export function createApp(deps: AppDeps) {
       const signupAt = clock.now().getTime();
       const install = getInstall(db, installId);
       const touches = install ? touchesForInstall(db, installId) : [];
+      const rejected = lastRejectedId(db, installId);
       const decision = decideAttribution({
+        rejectedCount: rejected.count,
         firstOpenAt: install?.first_open_at ?? null,
         signupAt,
         windowMs: config.windowMs,
@@ -237,6 +268,7 @@ export function createApp(deps: AppDeps) {
           firstOpenSource: install?.first_open_source ?? null,
           windowMs: config.windowMs,
           ruleVersion: RULE_VERSION,
+          lastRejectedId: rejected.last,
         },
         decision,
       );

@@ -46,6 +46,9 @@ const mismatched = count(
   "SELECT COUNT(*) AS n FROM touches t JOIN clicks c ON c.click_id = t.click_id WHERE c.source <> t.source OR c.params <> t.params",
 );
 if (mismatched) errors.push(`${mismatched} toques com fonte/params diferentes do clique gravado`);
+// Só os payloads inválidos de propósito (installs "lixo_*") podem gerar abertura recusada.
+const unexpectedRejections = count("SELECT COUNT(*) AS n FROM rejected_touches WHERE install_id NOT LIKE 'lixo%'");
+if (unexpectedRejections) errors.push(`${unexpectedRejections} aberturas legítimas foram recusadas`);
 const touchesOfInstall = db.prepare("SELECT COUNT(*) AS n FROM touches WHERE install_id = ?");
 
 const signupStmt = db.prepare(

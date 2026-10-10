@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS touches (
 );
 CREATE INDEX IF NOT EXISTS touches_by_install ON touches(install_id);
 
+-- Aberturas por link que não viraram toque. Ficam para auditoria e nunca vencem.
+CREATE TABLE IF NOT EXISTS rejected_touches (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  install_id       TEXT NOT NULL,
+  click_id         TEXT,
+  url              TEXT NOT NULL,
+  reason           TEXT NOT NULL CHECK (reason IN ('link_invalido','click_desconhecido','click_divergente','click_de_outro_install')),
+  received_at      INTEGER NOT NULL,
+  client_opened_at TEXT,
+  UNIQUE (install_id, url, reason)
+);
+
 CREATE TABLE IF NOT EXISTS signups (
   user_id          TEXT PRIMARY KEY,
   install_id       TEXT NOT NULL,
@@ -51,7 +63,8 @@ CREATE TABLE IF NOT EXISTS signups (
   rule_version     TEXT NOT NULL,
   origin           TEXT NOT NULL CHECK (origin IN ('campanha','indicacao','comunidade','organico')),
   reason           TEXT NOT NULL,
-  winning_touch_id INTEGER UNIQUE REFERENCES touches(id)
+  winning_touch_id INTEGER UNIQUE REFERENCES touches(id),
+  last_rejected_id INTEGER NOT NULL DEFAULT 0  -- toques rejeitados considerados: id <= este
 );
 CREATE INDEX IF NOT EXISTS signups_by_install ON signups(install_id);
 
@@ -120,6 +133,19 @@ export interface SignupRow {
   origin: Origin;
   reason: OriginReason;
   winning_touch_id: number | null;
+  last_rejected_id: number;
+}
+
+export type RejectionReason = "link_invalido" | "click_desconhecido" | "click_divergente" | "click_de_outro_install";
+
+export interface RejectedRow {
+  id: number;
+  install_id: string;
+  click_id: string | null;
+  url: string;
+  reason: RejectionReason;
+  received_at: number;
+  client_opened_at: string | null;
 }
 
 export interface AuditRow extends TouchRow {
@@ -175,6 +201,29 @@ export function getClick(db: Db, clickId: string): ClickRow | undefined {
   return db.prepare("SELECT * FROM clicks WHERE click_id = ?").get(clickId) as ClickRow | undefined;
 }
 
+/** Reenviar a mesma abertura recusada não cria outra linha (UNIQUE install + url + motivo). */
+export function insertRejected(
+  db: Db,
+  r: { installId: string; clickId: string | null; url: string; reason: RejectionReason; receivedAt: number; clientOpenedAt: string | null },
+): void {
+  db.prepare(
+    `INSERT INTO rejected_touches (install_id, click_id, url, reason, received_at, client_opened_at)
+     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+  ).run(r.installId, r.clickId, r.url, r.reason, r.receivedAt, r.clientOpenedAt);
+}
+
+export function lastRejectedId(db: Db, installId: string): { last: number; count: number } {
+  return db
+    .prepare("SELECT COALESCE(MAX(id), 0) AS last, COUNT(*) AS count FROM rejected_touches WHERE install_id = ?")
+    .get(installId) as { last: number; count: number };
+}
+
+export function rejectedForSignup(db: Db, s: SignupRow): RejectedRow[] {
+  return db
+    .prepare("SELECT * FROM rejected_touches WHERE install_id = ? AND id <= ? ORDER BY id")
+    .all(s.install_id, s.last_rejected_id) as unknown as RejectedRow[];
+}
+
 export interface NewTouch {
   clickId: string;
   installId: string;
@@ -221,14 +270,15 @@ export function insertSignup(
     firstOpenSource: FirstOpenSource | null;
     windowMs: number;
     ruleVersion: string;
+    lastRejectedId: number;
   },
   decision: Decision,
 ): void {
   db.prepare(
     `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, first_open_source, window_ms, rule_version,
-                          origin, reason, winning_touch_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, s.ruleVersion, decision.origin, decision.reason, decision.winnerTouchId);
+                          last_rejected_id, origin, reason, winning_touch_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, s.ruleVersion, s.lastRejectedId, decision.origin, decision.reason, decision.winnerTouchId);
   const stmt = db.prepare("INSERT INTO signup_touches (user_id, touch_id, result, reason) VALUES (?, ?, ?, ?)");
   for (const v of decision.verdicts) stmt.run(s.userId, v.touchId, v.result, v.reason);
 }

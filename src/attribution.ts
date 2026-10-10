@@ -29,6 +29,7 @@ export type OriginReason =
   | "venceu_empate_por_click_id"
   | "sem_toques"
   | "nenhum_toque_valido"
+  | "so_toques_rejeitados"
   | "cadastro_apos_janela"
   | "install_desconhecido";
 
@@ -46,6 +47,8 @@ export interface DecisionInput {
   signupAt: number;
   windowMs: number;
   touches: TouchInput[];
+  /** Aberturas por link recusadas (link inválido, cid desconhecido...). Nunca vencem. */
+  rejectedCount?: number;
 }
 
 export interface TouchVerdict {
@@ -83,11 +86,12 @@ function ineligibleReason(t: TouchInput, input: DecisionInput): TouchReason | nu
 }
 
 export function decideAttribution(input: DecisionInput): Decision {
+  const onlyRejected = input.touches.length === 0 && (input.rejectedCount ?? 0) > 0;
   if (input.firstOpenAt === null) {
     return {
       origin: "organico",
       winnerTouchId: null,
-      reason: "install_desconhecido",
+      reason: onlyRejected ? "so_toques_rejeitados" : "install_desconhecido",
       windowStart: null,
       windowEnd: null,
       verdicts: [],
@@ -123,7 +127,7 @@ export function decideAttribution(input: DecisionInput): Decision {
 
   let originReason: OriginReason;
   if (!winner) {
-    originReason = input.touches.length === 0 ? "sem_toques" : "nenhum_toque_valido";
+    originReason = onlyRejected ? "so_toques_rejeitados" : input.touches.length === 0 ? "sem_toques" : "nenhum_toque_valido";
   } else {
     // O vencedor diz se precisou de desempate, olhando só para o segundo colocado.
     const runnerUp = rest[0];

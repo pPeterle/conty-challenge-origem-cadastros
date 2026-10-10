@@ -359,6 +359,47 @@ describe("cadastro e auditoria", () => {
     });
   });
 
+  it("cadastro só com toques rejeitados vira orgânico com motivo so_toques_rejeitados e mostra os rejeitados", async () => {
+    const { post, get } = setup();
+    await post("/installs", { install_id: "inst_1" });
+    await post("/touches", { install_id: "inst_1", url: "https://evil.example/abrir?src=campanha&cmp=x&cid=clk_eeee0001" });
+    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_inventado1") });
+    const real = (await get("/l?src=comunidade&com=grupo_ugc")).headers.get("location")!;
+    await post("/touches", { install_id: "inst_1", url: real.replace("src=comunidade&com=grupo_ugc", "src=campanha&cmp=x") });
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution & {
+      toques_rejeitados: { click_id: string | null; motivo: string; resultado: string }[];
+    };
+    expect(body.origem).toEqual({ tipo: "organico", motivo: "so_toques_rejeitados", click_id: null, params: null });
+    expect(body.toques_considerados).toEqual([]);
+    expect(body.toques_rejeitados.map((r) => [r.click_id, r.resultado, r.motivo])).toEqual([
+      ["clk_eeee0001", "rejeitado", "link_invalido"],
+      ["clk_inventado1", "rejeitado", "click_desconhecido"],
+      ["clk_test0001", "rejeitado", "click_divergente"],
+    ]);
+  });
+
+  it("toque válido vence e o rejeitado aparece na auditoria; reenviar a mesma recusa não duplica", async () => {
+    const { click, post, db } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
+    for (let i = 0; i < 3; i++) await post("/touches", { install_id: "inst_1", url: campaignLink("clk_inventado1") });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM rejected_touches").get()).toEqual({ n: 1 });
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution & {
+      toques_rejeitados: { motivo: string }[];
+    };
+    expect(body.origem).toMatchObject({ tipo: "indicacao", motivo: "toque_mais_recente_na_janela" });
+    expect(body.toques_rejeitados).toMatchObject([{ motivo: "click_desconhecido" }]);
+  });
+
+  it("cid de outro install fica registrado como recusado no install que tentou usar", async () => {
+    const { click, post, db } = setup();
+    const url = click(campaignLink("clk_aaaa0001"));
+    await post("/touches", { install_id: "inst_1", url });
+    await post("/touches", { install_id: "inst_2", url });
+    expect(db.prepare("SELECT install_id, click_id, reason FROM rejected_touches").all()).toEqual([
+      { install_id: "inst_2", click_id: "clk_aaaa0001", reason: "click_de_outro_install" },
+    ]);
+  });
+
   it("cadastro de install nunca visto fica orgânico com motivo install_desconhecido", async () => {
     const { click, post } = setup();
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_x" })).json()) as Attribution;
