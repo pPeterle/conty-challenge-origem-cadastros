@@ -27,7 +27,7 @@ O contrato tem três momentos: o clique, a abertura do app e o cadastro.
 
 ### 1. O que viaja no link
 
-O link público não tem identificador de clique. Ele passa por um redirecionador (`GET /l`), que valida os parâmetros, gera um `cid` novo para aquele clique e manda o navegador para o link que abre o app.
+O link público não tem identificador de clique. Ele passa por um redirecionador (`GET /l`), que valida os parâmetros, gera um `cid` novo, grava o clique (`cid`, fonte, parâmetros e horário do servidor) e só então manda o navegador para o link que abre o app.
 
 | fonte | `src` | obrigatório | opcional |
 |---|---|---|---|
@@ -49,22 +49,28 @@ O que o redirecionador devolve (chamadas reais):
 ```
 $ curl -si "localhost:3104/l?src=campanha&cmp=cmp_123&ch=instagram"
 HTTP/1.1 302 Found
-location: https://conty.app/abrir?src=campanha&cmp=cmp_123&ch=instagram&cid=clk_f11238bc04404636bbcf33979e27abc0
+location: https://conty.app/abrir?src=campanha&cmp=cmp_123&ch=instagram&cid=clk_fb736b081a8b42b39e65e7850f660e90
 
 $ curl -si "localhost:3104/l?src=indicacao&ref=MARIA2026"
 HTTP/1.1 302 Found
-location: https://conty.app/abrir?src=indicacao&ref=MARIA2026&cid=clk_2adf5ac4129c454fa7aa724ea1c2af60
+location: https://conty.app/abrir?src=indicacao&ref=MARIA2026&cid=clk_59dba3ea274840f8b4a0462322e4afa7
 ```
 
 O `cid` nasce no clique. Reabrir o mesmo link pelo histórico, ou o app receber o mesmo deep link duas vezes, traz o mesmo `cid`, e é ele a chave de dedupe.
+
+A fonte e os parâmetros que valem são os gravados no clique. Quem editar a URL no caminho (trocar `src=comunidade` por `src=campanha`, ou inventar um `cid`) recebe 409 `click_divergente` ou 400 `click_desconhecido`, e a tentativa fica registrada como abertura recusada. Assim não dá para forjar uma origem só montando a URL. Ainda dá para clicar de propósito num link real, mas isso conta como clique de verdade.
 
 ### 2. O que o app grava
 
 Na primeira abertura, o app gera um `install_id` (um UUID guardado no aparelho) e chama `POST /installs`, mandando também `first_open_at` com o relógio do aparelho. A janela conta desse horário quando ele é plausível (no máximo 5 minutos à frente do servidor e no máximo 30 dias para trás), o que cobre o app que abriu offline e só sincronizou depois. Fora desses limites, ou sem o campo, vale o horário em que o servidor recebeu a chamada. Os dois horários ficam gravados, junto com a fonte usada (`aparelho` ou `servidor`), e a auditoria mostra essa fonte.
 
-Toda vez que o app abre por um link, ele manda `POST /touches` com o `install_id` e a URL que recebeu, sem interpretar nada. A URL precisa apontar para `APP_LINK_BASE` (mesmo protocolo, host e caminho). O app pode mandar `opened_at` (relógio do aparelho), que fica só para auditoria. A ordem entre toques e a comparação com o cadastro usam o horário do servidor.
+Toda vez que o app abre por um link, ele manda `POST /touches` com o `install_id` e a URL que recebeu, sem interpretar nada. A URL precisa apontar para `APP_LINK_BASE` (mesmo protocolo, host e caminho) e trazer um `cid` emitido pelo redirecionador, com a mesma fonte e os mesmos parâmetros. O app pode mandar `opened_at` (relógio do aparelho), que fica só para auditoria. A ordem entre toques e a comparação com o cadastro usam o horário do servidor.
+
+Aberturas recusadas (link inválido, `cid` desconhecido, `cid` forjado ou `cid` de outro install) ficam em `rejected_touches` com o motivo. Elas nunca vencem, mas aparecem na auditoria do cadastro em `toques_rejeitados`.
 
 Se o toque chega antes do `POST /installs`, ele registra o install com o horário do servidor. Um `POST /installs` que chegar depois ainda pode recuar esse início para o horário do aparelho, uma vez só.
+
+Não há tolerância para toque antes da primeira abertura. O horário do toque é o do servidor, e o `first_open_at` nunca fica depois do momento em que o servidor soube do install, então um toque só cai antes da janela se o relógio do servidor voltar.
 
 ### 3. O que o cadastro consome
 
@@ -72,15 +78,15 @@ Se o toque chega antes do `POST /installs`, ele registra o install com o horári
 
 ## Regras e onde elas vivem
 
-A regra inteira está na função pura `decideAttribution`, em [`src/attribution.ts`](src/attribution.ts). Ela recebe os toques, o início da janela, o horário do cadastro e a duração da janela, e devolve origem, motivo e veredito por toque. Não acessa banco nem relógio.
+A regra inteira está na função pura `decideAttribution`, em [`src/attribution.ts`](src/attribution.ts). Ela recebe os toques, o início da janela, o horário do cadastro e a duração da janela, e devolve origem, motivo e veredito por toque. Não acessa banco nem relógio. Cada cadastro grava a versão da regra que o decidiu (`regra.versao`, hoje `last_touch_v1`).
 
 1. A janela vai de `first_open_at` até `first_open_at + ATTRIBUTION_WINDOW_HOURS`, com o limite incluído. Cada cadastro grava a janela que usou, então mudar a configuração não reescreve o passado.
 2. Um cadastro feito depois do fim da janela é orgânico, com motivo `cadastro_apos_janela`, e todos os toques aparecem como perdedores com esse mesmo motivo. Daí sai a garantia de que um toque fora da janela nunca vence: se o cadastro está dentro da janela, todo toque anterior a ele também está.
 3. Toque com horário posterior ao cadastro perde com `posterior_ao_cadastro`. No mesmo milissegundo do cadastro, ainda conta.
 4. Vence o toque válido mais recente (last touch).
 5. Em empate de horário, a ordem é `campanha > indicacao > comunidade`. Se a fonte também empata, vence o menor `click_id` em ordem lexical. O resultado nunca depende da ordem em que os toques foram lidos.
-6. `touches.click_id` é UNIQUE: o mesmo clique reenviado devolve o toque existente com `duplicado: true`. `signups.winning_touch_id` também é UNIQUE, então um segundo cadastro no mesmo aparelho não reaproveita o clique que já virou origem do primeiro (`ja_usado_em_outro_cadastro`). Um `cid` que já pertence a outro install devolve 409 `click_de_outro_install`, mas a abertura do segundo install fica registrada.
-7. Sem toque válido, a origem é `organico` e o motivo fica gravado: `sem_toques`, `nenhum_toque_valido` (havia toques, mas todos já tinham sido usados), `cadastro_apos_janela` ou `install_desconhecido` (o `install_id` nunca passou pela API).
+6. `touches.click_id` é UNIQUE: o mesmo clique reenviado devolve o toque existente com `duplicado: true`. O mesmo `cid` com outra fonte ou outros parâmetros devolve 409 `click_divergente`. `signups.winning_touch_id` também é UNIQUE, então um segundo cadastro no mesmo aparelho não reaproveita o clique que já virou origem do primeiro (`ja_usado_em_outro_cadastro`). Um `cid` que já pertence a outro install devolve 409 `click_de_outro_install`, mas a abertura do segundo install fica registrada.
+7. Sem toque válido, a origem é `organico` e o motivo fica gravado: `sem_toques`, `so_toques_rejeitados` (só houve aberturas recusadas), `nenhum_toque_valido` (havia toques, mas todos já tinham sido usados), `cadastro_apos_janela` ou `install_desconhecido` (o `install_id` nunca passou pela API).
 8. O cadastro é idempotente. O mesmo `user_id` com o mesmo `install_id` devolve a decisão gravada (200), mesmo que tenham chegado toques novos. Com outro `install_id`, a resposta é 409.
 
 | motivo | resultado |
@@ -93,6 +99,7 @@ A regra inteira está na função pura `decideAttribution`, em [`src/attribution
 | `posterior_ao_cadastro` | perdeu |
 | `ja_usado_em_outro_cadastro` | perdeu |
 | `anterior_a_primeira_abertura` | perdeu (raro: só se o relógio do servidor voltar) |
+| `link_invalido` / `click_desconhecido` / `click_divergente` / `click_de_outro_install` | rejeitado (em `toques_rejeitados`) |
 
 Toques que chegam depois do cadastro aparecem em `toques_apos_cadastro`. Se o `opened_at` do aparelho for anterior ao cadastro (fila offline ou relógio errado), o item vem com `relogio_diverge: true`. A origem não muda.
 
@@ -105,15 +112,17 @@ Empate exato de milissegundo é raro com horário do servidor, mas precisa ter r
 ## Modelo de dados
 
 ```
+clicks          (click_id PK, source, params JSON, clicked_at)          gravado pelo GET /l
 installs        (install_id PK, first_open_at, first_open_source,
                  server_first_open_at, device_first_open_at)
-touches         (id PK, click_id UNIQUE, install_id, source, params JSON, touched_at, client_opened_at)
+touches         (id PK, click_id UNIQUE -> clicks, install_id, source, params JSON, touched_at, client_opened_at)
+rejected_touches (id PK, install_id, click_id, url, reason, received_at, client_opened_at)
 signups         (user_id PK, install_id, signup_at, first_open_at, first_open_source, window_ms,
-                 origin, reason, winning_touch_id UNIQUE NULL)
+                 rule_version, last_rejected_id, origin, reason, winning_touch_id UNIQUE NULL)
 signup_touches  (user_id, touch_id, result, reason)  PK (user_id, touch_id)
 ```
 
-`signup_touches` é o retrato do que foi considerado no momento do cadastro.
+`signup_touches` é o retrato do que foi considerado no momento do cadastro. `last_rejected_id` marca até onde as aberturas recusadas entram nesse retrato.
 
 ```mermaid
 stateDiagram-v2
@@ -122,100 +131,37 @@ stateDiagram-v2
   registrado --> venceu: cadastro, é o válido mais recente
   registrado --> perdeu: cadastro, motivo gravado
   registrado --> apos_cadastro: chegou depois do cadastro
+  [*] --> rejeitado: link inválido, cid desconhecido, forjado ou de outro install
   venceu --> [*]
   perdeu --> [*]
 ```
 
 ## Exemplo real, do clique à auditoria
 
-Sessão com a API na porta 3104 e `curl`. O JSON da auditoria está formatado para leitura.
-
-```bash
-# primeira abertura; o aparelho informa que abriu 2 h antes de sincronizar
-$ curl -s localhost:3104/installs -H 'content-type: application/json' \
-  -d '{"install_id":"inst_8f2c","first_open_at":"2026-10-10T02:10:34Z"}'
-{"install_id":"inst_8f2c","first_open_at":"2026-10-10T02:10:34.000Z","first_open_source":"aparelho","server_first_open_at":"2026-10-10T04:10:34.818Z","device_first_open_at":"2026-10-10T02:10:34.000Z","novo":true}   # 201
-
-# o app abre pelo link de campanha
-$ curl -s localhost:3104/touches -H 'content-type: application/json' \
-  -d '{"install_id":"inst_8f2c","url":"https://conty.app/abrir?src=campanha&cmp=cmp_123&ch=instagram&cid=clk_f11238bc04404636bbcf33979e27abc0"}'
-{"install_id":"inst_8f2c","click_id":"clk_f11238bc04404636bbcf33979e27abc0","source":"campanha","params":{"cmp":"cmp_123","ch":"instagram"},"touched_at":"2026-10-10T04:10:34.835Z","client_opened_at":null,"duplicado":false}   # 201
-
-# o mesmo link de novo
-$ curl -s localhost:3104/touches -H 'content-type: application/json' \
-  -d '{"install_id":"inst_8f2c","url":"https://conty.app/abrir?src=campanha&cmp=cmp_123&ch=instagram&cid=clk_f11238bc04404636bbcf33979e27abc0"}'
-{"install_id":"inst_8f2c","click_id":"clk_f11238bc04404636bbcf33979e27abc0","source":"campanha","params":{"cmp":"cmp_123","ch":"instagram"},"touched_at":"2026-10-10T04:10:34.835Z","client_opened_at":null,"duplicado":true}    # 200
-
-# um segundo depois, o link de indicação
-$ curl -s localhost:3104/touches -H 'content-type: application/json' \
-  -d '{"install_id":"inst_8f2c","url":"https://conty.app/abrir?src=indicacao&ref=MARIA2026&cid=clk_2adf5ac4129c454fa7aa724ea1c2af60"}'
-{"install_id":"inst_8f2c","click_id":"clk_2adf5ac4129c454fa7aa724ea1c2af60","source":"indicacao","params":{"ref":"MARIA2026"},"touched_at":"2026-10-10T04:10:35.880Z","client_opened_at":null,"duplicado":false}   # 201
-
-# cadastro (201; repetir devolve 200 com o mesmo corpo)
-$ curl -s localhost:3104/signups -H 'content-type: application/json' -d '{"user_id":"u_ana","install_id":"inst_8f2c"}'
-
-# depois do cadastro chega um toque de comunidade que o aparelho diz ter aberto antes
-$ curl -s localhost:3104/touches -H 'content-type: application/json' \
-  -d '{"install_id":"inst_8f2c","url":"https://conty.app/abrir?src=comunidade&com=grupo_ugc&cid=clk_manual_0001","opened_at":"2026-10-10T04:09:35Z"}'
-
-$ curl -s localhost:3104/signups/u_ana/attribution
-```
+Numa sessão real, o aparelho `inst_8f2c` abriu pelo link de campanha, recebeu uma URL forjada (fonte trocada) e uma com `cid` inventado, depois abriu pelo link de indicação e se cadastrou. O link de comunidade verdadeiro chegou depois do cadastro. Os `curl` de cada passo, com as respostas, estão em [`docs/exemplo-completo.md`](docs/exemplo-completo.md). A auditoria ficou assim (`GET /signups/u_ana/attribution`):
 
 ```json
 {
   "user_id": "u_ana",
   "install_id": "inst_8f2c",
-  "signup_at": "2026-10-10T04:10:35.906Z",
-  "origem": {
-    "tipo": "indicacao",
-    "motivo": "toque_mais_recente_na_janela",
-    "click_id": "clk_2adf5ac4129c454fa7aa724ea1c2af60",
-    "params": { "ref": "MARIA2026" }
-  },
-  "regra": {
-    "nome": "last_touch",
-    "janela_horas": 168,
-    "janela_inicio": "2026-10-10T02:10:34.000Z",
-    "janela_inicio_fonte": "aparelho",
-    "janela_fim": "2026-10-17T02:10:34.000Z",
-    "desempate": ["campanha", "indicacao", "comunidade", "click_id"]
-  },
+  "signup_at": "2026-10-10T04:20:05.734Z",
+  "origem": {"tipo": "indicacao", "motivo": "toque_mais_recente_na_janela", "click_id": "clk_59dba3ea274840f8b4a0462322e4afa7", "params": {"ref": "MARIA2026"}},
+  "regra": {"nome": "last_touch", "versao": "last_touch_v1", "janela_horas": 168, "janela_inicio": "2026-10-10T02:20:04.000Z", "janela_inicio_fonte": "aparelho", "janela_fim": "2026-10-17T02:20:04.000Z", "desempate": ["campanha", "indicacao", "comunidade", "click_id"]},
   "toques_considerados": [
-    {
-      "click_id": "clk_f11238bc04404636bbcf33979e27abc0",
-      "source": "campanha",
-      "params": { "cmp": "cmp_123", "ch": "instagram" },
-      "touched_at": "2026-10-10T04:10:34.835Z",
-      "client_opened_at": null,
-      "resultado": "perdeu",
-      "motivo": "perdeu_para_toque_mais_recente"
-    },
-    {
-      "click_id": "clk_2adf5ac4129c454fa7aa724ea1c2af60",
-      "source": "indicacao",
-      "params": { "ref": "MARIA2026" },
-      "touched_at": "2026-10-10T04:10:35.880Z",
-      "client_opened_at": null,
-      "resultado": "venceu",
-      "motivo": "toque_mais_recente_na_janela"
-    }
+    {"click_id": "clk_fb736b081a8b42b39e65e7850f660e90", "source": "campanha", "params": {"cmp": "cmp_123", "ch": "instagram"}, "clicked_at": "2026-10-10T04:19:46.487Z", "touched_at": "2026-10-10T04:20:04.649Z", "client_opened_at": null, "resultado": "perdeu", "motivo": "perdeu_para_toque_mais_recente"},
+    {"click_id": "clk_59dba3ea274840f8b4a0462322e4afa7", "source": "indicacao", "params": {"ref": "MARIA2026"}, "clicked_at": "2026-10-10T04:19:46.509Z", "touched_at": "2026-10-10T04:20:05.716Z", "client_opened_at": null, "resultado": "venceu", "motivo": "toque_mais_recente_na_janela"}
+  ],
+  "toques_rejeitados": [
+    {"click_id": "clk_f067b20f830f470e955dedb599aaa616", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_f067b20f830f470e955dedb599aaa616", "received_at": "2026-10-10T04:20:04.676Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_divergente"},
+    {"click_id": "clk_inventado_123", "url": "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_inventado_123", "received_at": "2026-10-10T04:20:04.689Z", "client_opened_at": null, "resultado": "rejeitado", "motivo": "click_desconhecido"}
   ],
   "toques_apos_cadastro": [
-    {
-      "click_id": "clk_manual_0001",
-      "source": "comunidade",
-      "params": { "com": "grupo_ugc" },
-      "touched_at": "2026-10-10T04:10:35.940Z",
-      "client_opened_at": "2026-10-10T04:09:35.000Z",
-      "resultado": "perdeu",
-      "motivo": "posterior_ao_cadastro",
-      "relogio_diverge": true
-    }
+    {"click_id": "clk_f067b20f830f470e955dedb599aaa616", "source": "comunidade", "params": {"com": "grupo_ugc"}, "clicked_at": "2026-10-10T04:19:46.535Z", "touched_at": "2026-10-10T04:20:05.765Z", "client_opened_at": "2026-10-10T04:19:05.000Z", "resultado": "perdeu", "motivo": "posterior_ao_cadastro", "relogio_diverge": true}
   ]
 }
 ```
 
-Um cadastro sem link nenhum volta com `"origem": {"tipo": "organico", "motivo": "sem_toques", "click_id": null, "params": null}` e `toques_considerados: []`.
+Um cadastro sem link nenhum volta com `"origem": {"tipo": "organico", "motivo": "sem_toques", "click_id": null, "params": null}` e as três listas vazias.
 
 ## Validação e limites
 
@@ -225,6 +171,9 @@ Todo dado de entrada (corpo, query do `/l` e `:user_id` da rota) passa por um sc
 |---|---|---|
 | campo ausente, tipo errado, id fora do padrão, data sem fuso | 400 | `validacao` (com `details` por campo) |
 | link sem `cid`, fonte desconhecida, parâmetro repetido, host diferente de `APP_LINK_BASE` | 400 | `link_invalido` |
+| `cid` que o redirecionador não emitiu | 400 | `click_desconhecido` |
+| fonte ou parâmetros diferentes do clique gravado | 409 | `click_divergente` |
+| `cid` já usado por outro install | 409 | `click_de_outro_install` |
 | JSON malformado | 400 | `corpo_invalido` |
 | content-type diferente de `application/json` | 400 | `content_type_invalido` |
 | corpo acima de 16 KB | 413 | `corpo_grande_demais` |
@@ -253,6 +202,9 @@ $ curl -s localhost:3104/touches -H 'content-type: application/json' \
 | auditoria | `GET /signups/:id/attribution` em vários testes de `api.test.ts` |
 | cadastro idempotente e concorrente | `api.test.ts`: "cadastro repetido devolve a mesma decisão..."; `concurrency.test.ts`: "cadastros duplicados concorrentes..." |
 | exemplos de link | `api.test.ts`: "link de campanha redireciona..." e "link de indicação redireciona..."; `link.test.ts` |
+| origem não pode ser forjada pela URL | `api.test.ts`: "origem forjada: trocar src ou params na url de um cid real devolve 409 click_divergente", "cid que o redirecionador não emitiu..." |
+| aberturas recusadas na auditoria | `api.test.ts`: "cadastro só com toques rejeitados vira orgânico com motivo so_toques_rejeitados..." |
+| ordem de chegada não muda o resultado | `attribution.test.ts`: "as 720 ordens possíveis..."; `api.test.ts`: "ordem de chegada ... com o mesmo horário não muda a origem" |
 | payloads inválidos não gravam nada | `payloads-invalidos.test.ts` |
 
 Os testes de integração usam `app.request` com sqlite `:memory:` e um `FixedClock` ([`src/clock.ts`](src/clock.ts)) que só anda quando o teste manda. Com ele, empates de horário e janelas de 7 ou 60 dias são testados sem espera.
@@ -263,14 +215,16 @@ Estou supondo que, mesmo num pico de campanha, o volume fique na casa de dezenas
 
 ## Teste de carga
 
-`npm run load` roda 2000 aparelhos em 50 VUs no k6. Os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real (macOS ocupado por outros processos, load average em torno de 32):
+`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real no macOS (load average em torno de 9, com outros processos rodando):
 
 ```
-checks.........................: 100.00% 6702 out of 6702
-http_req_duration..............: avg=83.89ms med=37.39ms p(90)=102.45ms p(95)=158.63ms max=6.88s
-http_req_failed................: 0.24%   50 out of 20252
-http_reqs......................: 20252   1703.135035/s
+checks.........................: 100.00% 9203 out of 9203
+http_req_duration..............: avg=24.9ms med=17.81ms p(90)=38.34ms p(95)=46.46ms max=1.24s
+http_req_failed................: 0.00%   0 out of 22703
+http_reqs......................: 22703   5245.088804/s
+iterations.....................: 2000    462.061296/s
 
+cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500
 installs: 2000 (esperado 2000)
 cadastros: 2000 (esperado 2000), origens conferidas e auditorias recalculadas: 2000
@@ -281,6 +235,6 @@ O cenário completo, a investigação das falhas de conexão com 50 VUs (backlog
 
 ## Uso de IA
 
-O código, os testes e a documentação foram produzidos com Claude Code (Claude Opus) a partir do enunciado do desafio. As decisões de modelagem (last touch, ordem de desempate, `cid` gerado no redirecionador, início da janela pelo relógio do aparelho quando plausível, expiração do cadastro fora da janela) foram propostas durante essa sessão e estão justificadas acima.
+O código, os testes e a documentação foram produzidos com Claude Code (Claude Opus) a partir do enunciado do desafio. As decisões de modelagem (last touch, ordem de desempate, `cid` gerado e clique gravado no redirecionador, início da janela pelo relógio do aparelho quando plausível, expiração do cadastro fora da janela) foram propostas durante essa sessão e estão justificadas acima.
 
 O que eu revisei: a regra de atribuição e os motivos de cada toque, os testes de integração (conferindo que cada requisito do enunciado tem um teste com nome encontrável) e os exemplos de `curl` deste README contra a API rodando. Também rodei `npm test`, `npm run typecheck` e `npm run load` localmente.

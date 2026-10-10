@@ -13,18 +13,20 @@ Com mais de uma instância da API, eu trocaria sqlite por Postgres mantendo as m
 
 ## O cenário de carga
 
-`npm run load` sobe a API na porta 3104 com banco temporário e roda [`load/attribution.js`](../load/attribution.js) no `grafana/k6:0.54.0`. Cada iteração é um aparelho: são 2000 aparelhos divididos entre 50 VUs. Os 5 reenvios de cada clique e os 3 reenvios de cada cadastro saem em paralelo (`http.batch`). Os aparelhos se dividem em quatro perfis:
+`npm run load` sobe a API na porta 3104 com banco temporário e roda [`load/attribution.js`](../load/attribution.js) no `grafana/k6:0.54.0`. Cada iteração é um aparelho: são 2000 aparelhos divididos entre 50 VUs. Todo link passa antes pelo redirecionador (`GET /l` sem seguir o 302), que grava o clique e devolve a URL com o `cid`. Os 5 reenvios de cada clique e os 3 reenvios de cada cadastro saem em paralelo (`http.batch`). Os aparelhos se dividem em quatro perfis:
 
 - sem link (primeira abertura repetida, com `first_open_at` do aparelho, e cadastro): esperado `organico`;
 - um link de campanha: esperado `campanha` com aquele `cid`;
 - indicação e depois campanha: esperado `campanha` com o segundo `cid`;
 - indicação, cadastro e depois um link de comunidade: esperado `indicacao`, com o de comunidade fora da decisão.
 
-Em cerca de 10% das iterações sai também um payload inválido sorteado entre 14 tipos: JSON quebrado, `null`, array, id numérico ou com espaço, url sem `cid`, de outro host ou gigante (413), data sem fuso, rota inexistente, método errado. O check exige 4xx com corpo de erro JSON. `http.setResponseCallback` marca 400/404/409/413 como esperados, então eles não contam em `http_req_failed`.
+Em cerca de 10% das iterações sai também um payload inválido sorteado entre 15 tipos: JSON quebrado, `null`, array, id numérico ou com espaço, url sem `cid`, `cid` inventado, url de outro host ou gigante (413), data sem fuso, rota inexistente, método errado. O check exige 4xx com corpo de erro JSON. `http.setResponseCallback` marca 400/404/409/413 como esperados, então eles não contam em `http_req_failed`.
 
 Os checks do k6 conferem que cada lote de reenvios teve exatamente um 201 e o resto 200, e que todas as respostas de cadastro trouxeram a origem esperada. No fim, [`scripts/verify-load.ts`](../scripts/verify-load.ts) lê o banco e sai com código 1 em qualquer um destes casos:
 
 - número de toques diferente do de cliques enviados, ou `click_id` repetido;
+- toque sem clique gravado, ou com fonte/params diferentes do clique;
+- abertura recusada fora dos installs de lixo do próprio teste;
 - número de installs ou de cadastros diferente do esperado (um payload inválido que gravasse algo apareceria aqui);
 - um toque como origem de dois cadastros;
 - origem diferente da esperada;
@@ -42,21 +44,22 @@ Duas mudanças no script de carga resolveram:
 
 ## Resultado
 
-Execução real, macOS com OrbStack, depois da validação com zod. Outros processos ocupavam a máquina nessa hora (load average em torno de 32), o que explica a cauda longa:
+Execução real no macOS com OrbStack, com a versão final (clique gravado, aberturas recusadas, zod). Outros processos rodavam na máquina (load average em torno de 9):
 
 ```
-checks.........................: 100.00% 6702 out of 6702
-http_req_duration..............: avg=83.89ms med=37.39ms p(90)=102.45ms p(95)=158.63ms max=6.88s
-http_req_failed................: 0.24%   50 out of 20252
-http_reqs......................: 20252   1703.135035/s
-iterations.....................: 2000    168.194256/s
+checks.........................: 100.00% 9203 out of 9203
+http_req_duration..............: avg=24.9ms med=17.81ms p(90)=38.34ms p(95)=46.46ms max=1.24s
+http_req_failed................: 0.00%   0 out of 22703
+http_reqs......................: 22703   5245.088804/s
+iterations.....................: 2000    462.061296/s
 
+cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500
 installs: 2000 (esperado 2000)
 cadastros: 2000 (esperado 2000), origens conferidas e auditorias recalculadas: 2000
 OK: um toque por click_id, uma origem por cadastro, todas iguais à esperada.
 ```
 
-As 50 falhas de `http_req_failed` são tentativas de conexão que foram reenviadas. Todos os checks passaram, e a contagem no banco confere.
+Numa rodada anterior, com a máquina bem mais ocupada (load average em torno de 32), o p95 foi a 158,63 ms e 50 tentativas de conexão falharam e foram reenviadas (0,24% em `http_req_failed`). Os checks e a verificação passaram mesmo assim. Nesse estado, o p95 variou entre 89 ms e 215 ms de uma rodada para outra, então o threshold de latência (`p(95) < 200ms`) às vezes reprova sem que nenhuma invariante quebre. Os outros thresholds são `http_req_failed < 1%` e `checks > 99%`.
 
-Os thresholds são `p(95) < 200ms`, `http_req_failed < 1%` e `checks > 99%`. Nesta máquina, com ela ocupada, o p95 variou entre 89 ms e 215 ms de uma rodada para outra, então o threshold de latência às vezes reprova sem que nenhuma invariante quebre. Num benchmark sem rede (`app.request` em série com sqlite em arquivo), toque + cadastro custam cerca de 0,5 ms por requisição. A latência do k6 é quase toda fila de 250 requisições simultâneas num processo só.
+Num benchmark sem rede (`app.request` em série com sqlite em arquivo), toque + cadastro custam cerca de 0,5 ms por requisição. A latência do k6 é quase toda fila de até 250 requisições simultâneas num processo só.

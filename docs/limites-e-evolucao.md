@@ -3,12 +3,13 @@
 ## Fora do escopo
 
 - Deferred deep link. Quando a pessoa clica, vai para a loja e instala, o deep link se perde no caminho. Recuperar o `cid` nesse caso depende da plataforma (Install Referrer no Android; área de transferência ou um serviço como Branch no iOS). O contrato aceita esse `cid` do mesmo jeito, só não implementei a captura.
-- Autenticação das chamadas do app e assinatura do link. Hoje dá para forjar um `src=campanha`, e um HMAC sobre `src` + params + `cid` no redirecionador resolveria. Pelo mesmo motivo, um `cid` reenviado com outro `src` devolve o toque original (`duplicado: true`) em vez de um erro.
+- Autenticação das chamadas do app. A origem não pode ser forjada editando a URL (o clique gravado manda), mas qualquer um pode chamar `POST /touches` com um `cid` real que capturou. Amarrar o toque ao aparelho exigiria autenticar o app.
+- Limite de taxa. Payloads inválidos e aberturas recusadas são baratos, mas as recusas gravam uma linha (sem duplicar o mesmo par install + url + motivo). Um proxy com rate limit resolveria o abuso.
 - Relatório agregado por campanha ou por código de indicação. Os dados estão nas tabelas, mas não há endpoint.
 - O redirecionador não grava o clique. Gravar daria a taxa de clique para abertura, sem mudar a atribuição.
 
 ## Com mais tempo
 
-- Guardaria a versão da regra no cadastro (`regra.versao`), para poder trocar last touch por outra regra sem ambiguidade ao ler cadastros antigos.
+- Expiraria cliques sem toque depois de algum tempo, para a tabela `clicks` não crescer sem limite.
 - Mediria a carga em Linux, numa máquina sem outros processos, para separar o limite do macOS do limite da API.
-- Testaria com propriedades (fast-check) que `decideAttribution` não depende da ordem de entrada e que nunca há mais de um vencedor.
+- Trocaria o teste de permutação fixo por testes de propriedade (fast-check) com toques gerados ao acaso.
