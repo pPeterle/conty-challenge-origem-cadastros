@@ -198,6 +198,7 @@ describe("cadastro e auditoria", () => {
     expect(body.origem).toEqual({ tipo: "organico", motivo: "cadastro_apos_janela", click_id: null, params: null });
     expect(body.regra).toEqual({
       nome: "last_touch",
+      versao: "last_touch_v1",
       janela_horas: 168,
       janela_inicio: START,
       janela_inicio_fonte: "servidor",
@@ -256,6 +257,14 @@ describe("cadastro e auditoria", () => {
     const body = (await (await get("/signups/u_1/attribution")).json()) as Attribution;
     expect(body.origem.tipo).toBe("organico");
     expect(body.toques_apos_cadastro).toMatchObject([{ click_id: "clk_ref00001", relogio_diverge: true }]);
+  });
+
+  it("cada cadastro grava a versão da regra que o decidiu e a auditoria mostra", async () => {
+    const { post, get, db } = setup();
+    await post("/signups", { user_id: "u_1", install_id: "inst_1" });
+    expect(db.prepare("SELECT rule_version FROM signups").get()).toEqual({ rule_version: "last_touch_v1" });
+    const body = (await (await get("/signups/u_1/attribution")).json()) as { regra: { versao: string } };
+    expect(body.regra.versao).toBe("last_touch_v1");
   });
 
   it("cadastro sem toque fica orgânico com motivo sem_toques gravado", async () => {

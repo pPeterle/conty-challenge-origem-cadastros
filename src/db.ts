@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS signups (
   first_open_at    INTEGER,
   first_open_source TEXT,
   window_ms        INTEGER NOT NULL,
+  rule_version     TEXT NOT NULL,
   origin           TEXT NOT NULL CHECK (origin IN ('campanha','indicacao','comunidade','organico')),
   reason           TEXT NOT NULL,
   winning_touch_id INTEGER UNIQUE REFERENCES touches(id)
@@ -98,6 +99,7 @@ export interface SignupRow {
   first_open_at: number | null;
   first_open_source: FirstOpenSource | null;
   window_ms: number;
+  rule_version: string;
   origin: Origin;
   reason: OriginReason;
   winning_touch_id: number | null;
@@ -188,13 +190,15 @@ export function insertSignup(
     firstOpenAt: number | null;
     firstOpenSource: FirstOpenSource | null;
     windowMs: number;
+    ruleVersion: string;
   },
   decision: Decision,
 ): void {
   db.prepare(
-    `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, first_open_source, window_ms, origin, reason, winning_touch_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, decision.origin, decision.reason, decision.winnerTouchId);
+    `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, first_open_source, window_ms, rule_version,
+                          origin, reason, winning_touch_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, s.ruleVersion, decision.origin, decision.reason, decision.winnerTouchId);
   const stmt = db.prepare("INSERT INTO signup_touches (user_id, touch_id, result, reason) VALUES (?, ?, ?, ?)");
   for (const v of decision.verdicts) stmt.run(s.userId, v.touchId, v.result, v.reason);
 }

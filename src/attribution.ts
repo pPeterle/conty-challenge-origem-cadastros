@@ -3,6 +3,9 @@ import type { Source } from "./link.ts";
 // Regra de atribuição, sem I/O. Recebe os toques do install e devolve a origem
 // e um veredito por toque. Tudo que o cadastro grava sai daqui.
 
+/** Muda sempre que a regra mudar; cada cadastro grava a versão que o decidiu. */
+export const RULE_VERSION = "last_touch_v1";
+
 /** Ordem de desempate quando dois toques válidos têm o mesmo horário. */
 export const TIE_PRIORITY: readonly Source[] = ["campanha", "indicacao", "comunidade"];
 

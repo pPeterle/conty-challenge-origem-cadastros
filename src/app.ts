@@ -7,7 +7,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { ZodSchema } from "zod";
 import type { Clock } from "./clock.ts";
 import type { AttributionConfig } from "./config.ts";
-import { TIE_PRIORITY, decideAttribution } from "./attribution.ts";
+import { RULE_VERSION, TIE_PRIORITY, decideAttribution } from "./attribution.ts";
 import { buildAppLink, describe, parseAppLink } from "./link.ts";
 import {
   installBodySchema,
@@ -94,6 +94,7 @@ function attributionView(db: Db, s: SignupRow) {
     },
     regra: {
       nome: "last_touch",
+      versao: s.rule_version,
       janela_horas: s.window_ms / 3_600_000,
       janela_inicio: iso(s.first_open_at),
       janela_inicio_fonte: s.first_open_source,
@@ -220,6 +221,7 @@ export function createApp(deps: AppDeps) {
           firstOpenAt: install?.first_open_at ?? null,
           firstOpenSource: install?.first_open_source ?? null,
           windowMs: config.windowMs,
+          ruleVersion: RULE_VERSION,
         },
         decision,
       );
