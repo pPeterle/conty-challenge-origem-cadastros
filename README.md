@@ -215,14 +215,14 @@ Estou supondo que, mesmo num pico de campanha, o volume fique na casa de dezenas
 
 ## Teste de carga
 
-`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real no macOS (load average em torno de 9, com outros processos rodando):
+`npm run load` roda 2000 aparelhos em 50 VUs no k6. Cada link passa pelo redirecionador, os reenvios do mesmo clique e do mesmo cadastro saem em paralelo, cerca de 10% das iterações mandam também um payload inválido, e no fim um script confere as invariantes direto no banco. Execução real de 2026-10-10 nesta máquina (macOS, load average em torno de 4):
 
 ```
-checks.........................: 100.00% 9203 out of 9203
-http_req_duration..............: avg=24.9ms med=17.81ms p(90)=38.34ms p(95)=46.46ms max=1.24s
-http_req_failed................: 0.00%   0 out of 22703
-http_reqs......................: 22703   5245.088804/s
-iterations.....................: 2000    462.061296/s
+checks.........................: 100.00% 9196 out of 9196
+http_req_duration..............: avg=22.28ms med=15.95ms p(90)=34.38ms p(95)=40.37ms max=1.14s
+http_req_failed................: 0.00%   0 out of 22696
+http_reqs......................: 22696   5777.785502/s
+iterations.....................: 2000    509.145709/s
 
 cliques gravados: 2500
 toques: 2500 (esperado 2500), cliques distintos: 2500
