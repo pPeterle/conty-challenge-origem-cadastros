@@ -187,6 +187,25 @@ describe("cadastro e auditoria", () => {
     ]);
   });
 
+  it.each([
+    [["com", "ref", "camp"]],
+    [["com", "camp", "ref"]],
+    [["ref", "com", "camp"]],
+    [["ref", "camp", "com"]],
+    [["camp", "com", "ref"]],
+    [["camp", "ref", "com"]],
+  ])("ordem de chegada %j com o mesmo horário não muda a origem", async (order) => {
+    const { post } = setup();
+    const urls: Record<string, string> = {
+      com: communityLink("clk_com00001"),
+      ref: referralLink("clk_ref00001"),
+      camp: campaignLink("clk_camp0001"),
+    };
+    for (const k of order) await post("/touches", { install_id: "inst_1", url: urls[k] });
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
+    expect(body.origem).toMatchObject({ tipo: "campanha", click_id: "clk_camp0001", motivo: "venceu_empate_por_prioridade" });
+  });
+
   it("toque fora da janela (medida do first_open_at) não vence: cadastro fora da janela vira orgânico", async () => {
     const { post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });

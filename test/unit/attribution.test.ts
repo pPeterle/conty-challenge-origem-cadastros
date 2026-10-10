@@ -154,3 +154,44 @@ describe("chooseFirstOpen", () => {
     expect(chooseFirstOpen(now - 30 * DAY, now, limits).source).toBe("aparelho");
   });
 });
+
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  return items.flatMap((item, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]));
+}
+
+describe("permutação da ordem de chegada", () => {
+  // Empate triplo de horário, um toque mais antigo, um já usado e um posterior ao cadastro.
+  const at = T0 + 2 * HOUR;
+  const touches: TouchInput[] = [
+    touch(1, "comunidade", at, "clk_c"),
+    touch(2, "campanha", at, "clk_b"),
+    touch(3, "campanha", at, "clk_a"),
+    touch(4, "indicacao", T0 + HOUR),
+    { ...touch(5, "indicacao", at + 1), usedBySignup: "u_outro" },
+    touch(6, "campanha", T0 + 3 * DAY),
+  ];
+  const verdictsById = (d: ReturnType<typeof decideAttribution>) =>
+    Object.fromEntries(d.verdicts.map((v) => [v.touchId, `${v.result}:${v.reason}`]));
+  const reference = decideAttribution(base(touches));
+
+  it("as 720 ordens possíveis dão o mesmo vencedor, o mesmo motivo e os mesmos vereditos", () => {
+    const all = permutations(touches);
+    expect(all).toHaveLength(720);
+    for (const order of all) {
+      const d = decideAttribution(base(order));
+      expect(d.winnerTouchId).toBe(reference.winnerTouchId);
+      expect(d.reason).toBe(reference.reason);
+      expect(verdictsById(d)).toEqual(verdictsById(reference));
+    }
+    expect(reference.winnerTouchId).toBe(3);
+    expect(verdictsById(reference)).toEqual({
+      1: "perdeu:empate_desfeito_por_prioridade",
+      2: "perdeu:empate_desfeito_por_click_id",
+      3: "venceu:venceu_empate_por_click_id",
+      4: "perdeu:perdeu_para_toque_mais_recente",
+      5: "perdeu:ja_usado_em_outro_cadastro",
+      6: "perdeu:posterior_ao_cadastro",
+    });
+  });
+});
