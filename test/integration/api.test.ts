@@ -72,6 +72,25 @@ describe("contrato do link (redirecionador)", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 0 });
   });
 
+  it.each([
+    ["/l", "src=campanha&src=indicacao&cmp=x"],
+    ["/l", "src=indicacao&ref=A&ref=B"],
+    ["/touches", "src=campanha&cmp=cmp_123&cid=clk_aaaa0001&cid=clk_bbbb0002"],
+    ["/touches", "src=campanha&cmp=cmp_123&cmp=cmp_999&cid=clk_aaaa0001"],
+  ])("parâmetro repetido na URL (%s: %s) devolve 400", async (route, query) => {
+    const { click, get, post, db } = setup();
+    click(campaignLink("clk_aaaa0001"));
+    const res =
+      route === "/l"
+        ? await get(`/l?${query}`)
+        : await post("/touches", { install_id: "inst_1", url: `https://conty.app/abrir?${query}` });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; details: { motivo: string }[] } };
+    expect(body.error.code).toBe("link_invalido");
+    expect(body.error.details.map((d) => d.motivo)).toContain("veio lista (na URL, parâmetro repetido)");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 0 });
+  });
+
   it("link inválido devolve 400 com erro em JSON", async () => {
     const { click, get } = setup();
     const r = await get("/l?src=indicacao");

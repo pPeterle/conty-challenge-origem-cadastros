@@ -32,7 +32,8 @@ const TYPE_NAMES: Record<string, string> = {
 const ptErrorMap: z.ZodErrorMap = (issue, ctx) => {
   if (issue.code === z.ZodIssueCode.invalid_type) {
     if (issue.received === "undefined") return { message: "obrigatório" };
-    if (issue.expected === "string" && issue.received === "array") return { message: "informado mais de uma vez" };
+    // Nenhum campo aceita lista. Na query, lista quer dizer chave repetida (src=a&src=b).
+    if (issue.received === "array" && issue.expected !== "object") return { message: "veio lista (na URL, parâmetro repetido)" };
     return { message: `esperado ${TYPE_NAMES[issue.expected] ?? issue.expected}, veio ${TYPE_NAMES[issue.received] ?? issue.received}` };
   }
   if (issue.code === z.ZodIssueCode.invalid_enum_value) {
