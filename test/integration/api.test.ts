@@ -137,6 +137,21 @@ describe("toques e clique repetido", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 1 });
   });
 
+  it.each([
+    ["outra fonte", referralLink("clk_aaaa0001")],
+    ["outra campanha", campaignLink("clk_aaaa0001", "cmp_999")],
+    ["sem o canal", "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_aaaa0001"],
+  ])("mesmo cid reenviado com %s devolve 409 click_divergente e não altera o toque", async (_nome, url) => {
+    const { post, db } = setup();
+    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const r = await post("/touches", { install_id: "inst_1", url });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_divergente");
+    expect(db.prepare("SELECT source, params FROM touches").all()).toEqual([
+      { source: "campanha", params: JSON.stringify({ cmp: "cmp_123", ch: "instagram" }) },
+    ]);
+  });
+
   it("toque sem cid ou com payload inválido devolve 400", async () => {
     const { post } = setup();
     expect((await post("/touches", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=x" })).status).toBe(400);

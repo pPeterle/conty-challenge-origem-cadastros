@@ -184,6 +184,11 @@ export function createApp(deps: AppDeps) {
     if (outcome.touch.install_id !== body.install_id) {
       return fail(c, 409, "click_de_outro_install", "esse click_id já foi registrado por outro install");
     }
+    const sameLink =
+      outcome.touch.source === link.value.source && outcome.touch.params === JSON.stringify(link.value.params);
+    if (!outcome.created && !sameLink) {
+      return fail(c, 409, "click_divergente", "esse click_id já foi registrado com outra fonte ou outros parâmetros");
+    }
     return c.json(
       { install_id: body.install_id, ...touchView(outcome.touch), duplicado: !outcome.created },
       outcome.created ? 201 : 200,
