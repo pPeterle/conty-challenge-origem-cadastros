@@ -12,6 +12,7 @@ describe("concorrência e idempotência", () => {
     expect(statuses.filter((s) => s === 201)).toHaveLength(1);
     expect(statuses.filter((s) => s === 200)).toHaveLength(49);
     expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT times_received FROM touches").get()).toEqual({ times_received: 50 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM installs").get()).toEqual({ n: 1 });
   });
 

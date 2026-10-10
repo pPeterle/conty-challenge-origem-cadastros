@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS touches (
   source           TEXT NOT NULL CHECK (source IN ('campanha','indicacao','comunidade')),
   params           TEXT NOT NULL,
   touched_at       INTEGER NOT NULL,
-  client_opened_at TEXT
+  client_opened_at TEXT,
+  times_received   INTEGER NOT NULL DEFAULT 1  -- reenvios do mesmo clique pelo mesmo install
 );
 CREATE INDEX IF NOT EXISTS touches_by_install ON touches(install_id);
 
@@ -119,6 +120,7 @@ export interface TouchRow {
   params: string;
   touched_at: number;
   client_opened_at: string | null;
+  times_received: number;
   clicked_at: number | null;
 }
 
@@ -241,6 +243,13 @@ export function insertTouch(db: Db, t: NewTouch): { touch: TouchRow; created: bo
        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(click_id) DO NOTHING`,
     )
     .run(t.clickId, t.installId, t.source, JSON.stringify(t.params), t.touchedAt, t.clientOpenedAt);
+  if (res.changes === 0) {
+    // Reenvio: conta, mas não muda horário nem fonte. Clique de outro install não conta aqui.
+    db.prepare("UPDATE touches SET times_received = times_received + 1 WHERE click_id = ? AND install_id = ?").run(
+      t.clickId,
+      t.installId,
+    );
+  }
   const touch = db.prepare(`SELECT t.*, (SELECT clicked_at FROM clicks c WHERE c.click_id = t.click_id) AS clicked_at FROM touches t WHERE t.click_id = ?`).get(t.clickId) as unknown as TouchRow;
   return { touch, created: res.changes === 1 };
 }

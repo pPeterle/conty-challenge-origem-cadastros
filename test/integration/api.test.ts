@@ -190,6 +190,22 @@ describe("toques e clique repetido", () => {
     expect(signup.origem.tipo).toBe("campanha");
   });
 
+  it("reenvios do mesmo clique são contados em vezes_recebido e aparecem na auditoria do cadastro", async () => {
+    const { click, post, get, clock, db } = setup();
+    const url = click(campaignLink("clk_aaaa0001"));
+    for (let i = 0; i < 4; i++) {
+      await post("/touches", { install_id: "inst_1", url });
+      clock.advance(MINUTE);
+    }
+    await post("/touches", { install_id: "inst_2", url }); // outro install: recusado, não conta
+    await post("/signups", { user_id: "u_1", install_id: "inst_1" });
+    const body = (await (await get("/signups/u_1/attribution")).json()) as {
+      toques_considerados: { click_id: string; vezes_recebido: number; touched_at: string }[];
+    };
+    expect(body.toques_considerados).toMatchObject([{ click_id: "clk_aaaa0001", vezes_recebido: 4, touched_at: START }]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 1 });
+  });
+
   it("click_id de outro install devolve 409, mas a abertura do segundo install fica registrada", async () => {
     const { click, post, db } = setup();
     await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });

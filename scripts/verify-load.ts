@@ -6,7 +6,7 @@ import type { Source } from "../src/link.ts";
 
 const dbPath = process.argv[2];
 if (!dbPath) throw new Error("uso: verify-load.ts <arquivo.db>");
-const cfg = JSON.parse(readFileSync(new URL("../load/scenario.json", import.meta.url), "utf8")) as { installs: number };
+const cfg = JSON.parse(readFileSync(new URL("../load/scenario.json", import.meta.url), "utf8")) as { installs: number; touchDuplicates: number };
 const db = new DatabaseSync(dbPath, { readOnly: true });
 const errors: string[] = [];
 const count = (sql: string, ...args: (string | number)[]) => (db.prepare(sql).get(...args) as { n: number }).n;
@@ -49,6 +49,9 @@ if (mismatched) errors.push(`${mismatched} toques com fonte/params diferentes do
 // Só os payloads inválidos de propósito (installs "lixo_*") podem gerar abertura recusada.
 const unexpectedRejections = count("SELECT COUNT(*) AS n FROM rejected_touches WHERE install_id NOT LIKE 'lixo%'");
 if (unexpectedRejections) errors.push(`${unexpectedRejections} aberturas legítimas foram recusadas`);
+// Cada clique saiu touchDuplicates vezes; reenvio por falha de conexão pode somar mais, nunca menos.
+const undercounted = count("SELECT COUNT(*) AS n FROM touches WHERE times_received < ?", cfg.touchDuplicates);
+if (undercounted) errors.push(`${undercounted} toques com vezes_recebido menor que o número de reenvios`);
 const touchesOfInstall = db.prepare("SELECT COUNT(*) AS n FROM touches WHERE install_id = ?");
 
 const signupStmt = db.prepare(

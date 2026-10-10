@@ -92,6 +92,7 @@ function touchView(t: TouchRow) {
     clicked_at: iso(t.clicked_at),
     touched_at: iso(t.touched_at),
     client_opened_at: t.client_opened_at,
+    vezes_recebido: t.times_received,
   };
 }
 
