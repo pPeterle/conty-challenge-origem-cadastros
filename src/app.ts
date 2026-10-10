@@ -7,7 +7,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { ZodSchema } from "zod";
 import type { Clock } from "./clock.ts";
 import type { AttributionConfig } from "./config.ts";
-import { RULE_VERSION, TIE_PRIORITY, decideAttribution } from "./attribution.ts";
+import { RULE_VERSION, TIE_PRIORITY, chooseSignupAt, decideAttribution } from "./attribution.ts";
 import { buildAppLink, describe, parseAppLink } from "./link.ts";
 import {
   installBodySchema,
@@ -103,6 +103,9 @@ function attributionView(db: Db, s: SignupRow) {
     user_id: s.user_id,
     install_id: s.install_id,
     signup_at: iso(s.signup_at),
+    signup_at_fonte: s.signup_at_source,
+    signup_recebido_em: iso(s.server_signup_at),
+    signed_up_at_backend: iso(s.backend_signed_up_at),
     origem: {
       tipo: s.origin,
       motivo: s.reason,
@@ -236,14 +239,17 @@ export function createApp(deps: AppDeps) {
   });
 
   app.post("/signups", requireJson, validate("json", signupBodySchema), (c) => {
-    const { user_id: userId, install_id: installId } = c.req.valid("json");
+    const { user_id: userId, install_id: installId, signed_up_at: signedUpAt } = c.req.valid("json");
 
     const result = transaction(db, () => {
       const existing = getSignup(db, userId);
       if (existing) return { signup: existing, created: false };
 
-      const signupAt = clock.now().getTime();
+      const serverAt = clock.now().getTime();
       const install = getInstall(db, installId);
+      const backendAt = signedUpAt ? Date.parse(signedUpAt) : null;
+      const chosen = chooseSignupAt(backendAt, serverAt, install?.first_open_at ?? null, config.firstOpen);
+      const signupAt = chosen.at;
       const touches = install ? touchesForInstall(db, installId) : [];
       const rejected = lastRejectedId(db, installId);
       const decision = decideAttribution({
@@ -265,6 +271,9 @@ export function createApp(deps: AppDeps) {
           userId,
           installId,
           signupAt,
+          signupAtSource: chosen.source,
+          serverSignupAt: serverAt,
+          backendSignedUpAt: backendAt,
           firstOpenAt: install?.first_open_at ?? null,
           firstOpenSource: install?.first_open_source ?? null,
           windowMs: config.windowMs,

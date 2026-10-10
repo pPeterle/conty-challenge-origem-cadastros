@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DAY, HOUR, MINUTE } from "../../src/clock.ts";
-import { chooseFirstOpen, decideAttribution, type DecisionInput, type TouchInput } from "../../src/attribution.ts";
+import { chooseFirstOpen, chooseSignupAt, decideAttribution, type DecisionInput, type TouchInput } from "../../src/attribution.ts";
 
 const T0 = Date.parse("2026-03-01T12:00:00.000Z");
 const base = (touches: TouchInput[], over: Partial<DecisionInput> = {}): DecisionInput => ({
@@ -199,5 +199,29 @@ describe("permutação da ordem de chegada", () => {
       5: "perdeu:ja_usado_em_outro_cadastro",
       6: "perdeu:posterior_ao_cadastro",
     });
+  });
+});
+
+describe("chooseSignupAt", () => {
+  const limits = { maxFutureMs: 5 * MINUTE, maxAgeMs: 30 * DAY };
+  const now = T0 + 2 * DAY;
+
+  it("sem horário do backend, vale o do servidor", () => {
+    expect(chooseSignupAt(null, now, T0, limits)).toEqual({ at: now, source: "servidor" });
+  });
+
+  it("cadastro que chegou atrasado: vale o horário do backend", () => {
+    expect(chooseSignupAt(now - HOUR, now, T0, limits)).toEqual({ at: now - HOUR, source: "backend" });
+  });
+
+  it("levemente adiantado: fonte backend, horário do servidor", () => {
+    expect(chooseSignupAt(now + MINUTE, now, T0, limits)).toEqual({ at: now, source: "backend" });
+  });
+
+  it("implausível (futuro além da tolerância, antes da primeira abertura, velho demais): vale o servidor", () => {
+    expect(chooseSignupAt(now + 6 * MINUTE, now, T0, limits).source).toBe("servidor");
+    expect(chooseSignupAt(T0 - 1, now, T0, limits).source).toBe("servidor");
+    expect(chooseSignupAt(now - 31 * DAY, now, null, limits).source).toBe("servidor");
+    expect(chooseSignupAt(T0, now, T0, limits).source).toBe("backend");
   });
 });

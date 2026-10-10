@@ -183,3 +183,25 @@ export function chooseFirstOpen(
   }
   return { at: Math.min(deviceAt, serverAt), source: "aparelho" };
 }
+
+export type SignupAtSource = "backend" | "servidor";
+
+/**
+ * Instante do cadastro. O backend de contas pode informar quando o cadastro aconteceu
+ * (a chamada para cá pode chegar atrasada). Vale se for plausível: até a tolerância à frente
+ * do servidor, não mais velho que o limite e não anterior à primeira abertura. Senão, vale o
+ * horário em que o servidor recebeu a chamada.
+ */
+export function chooseSignupAt(
+  backendAt: number | null,
+  serverAt: number,
+  firstOpenAt: number | null,
+  limits: FirstOpenLimits,
+): { at: number; source: SignupAtSource } {
+  if (backendAt === null) return { at: serverAt, source: "servidor" };
+  const tooNew = backendAt > serverAt + limits.maxFutureMs;
+  const tooOld = backendAt < serverAt - limits.maxAgeMs;
+  const beforeFirstOpen = firstOpenAt !== null && backendAt < firstOpenAt;
+  if (tooNew || tooOld || beforeFirstOpen) return { at: serverAt, source: "servidor" };
+  return { at: Math.min(backendAt, serverAt), source: "backend" };
+}

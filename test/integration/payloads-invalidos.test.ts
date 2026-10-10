@@ -164,6 +164,15 @@ describe("datas com fuso impossível", () => {
     expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
   });
 
+  it.each([...impossibleDates, "2026-03-01", "ontem", "2026-03-01T12:00:00"])(
+    "signed_up_at %s em POST /signups devolve 400",
+    async (value) => {
+      const { post, db } = setup();
+      await expectError(await post("/signups", { user_id: "u_1", install_id: "inst_1", signed_up_at: value }), 400);
+      expect(tableCounts(db)).toEqual([0, 0, 0, 0, 0]);
+    },
+  );
+
   it.each(impossibleDates)("opened_at %s em POST /touches devolve 400, não 500", async (value) => {
     const { post, db, click } = setup();
     const res = await post("/touches", { install_id: "inst_1", url: click(VALID_URL), opened_at: value });

@@ -7,6 +7,7 @@ import {
   type FirstOpenSource,
   type Origin,
   type OriginReason,
+  type SignupAtSource,
   type TouchReason,
 } from "./attribution.ts";
 
@@ -57,7 +58,10 @@ CREATE TABLE IF NOT EXISTS rejected_touches (
 CREATE TABLE IF NOT EXISTS signups (
   user_id          TEXT PRIMARY KEY,
   install_id       TEXT NOT NULL,
-  signup_at        INTEGER NOT NULL,
+  signup_at        INTEGER NOT NULL,   -- instante usado na regra
+  signup_at_source TEXT NOT NULL CHECK (signup_at_source IN ('backend','servidor')),
+  server_signup_at INTEGER NOT NULL,   -- quando a chamada chegou aqui
+  backend_signed_up_at INTEGER,        -- o que o backend informou, aceito ou não
   first_open_at    INTEGER,
   first_open_source TEXT,
   window_ms        INTEGER NOT NULL,
@@ -128,6 +132,9 @@ export interface SignupRow {
   user_id: string;
   install_id: string;
   signup_at: number;
+  signup_at_source: SignupAtSource;
+  server_signup_at: number;
+  backend_signed_up_at: number | null;
   first_open_at: number | null;
   first_open_source: FirstOpenSource | null;
   window_ms: number;
@@ -275,6 +282,9 @@ export function insertSignup(
     userId: string;
     installId: string;
     signupAt: number;
+    signupAtSource: SignupAtSource;
+    serverSignupAt: number;
+    backendSignedUpAt: number | null;
     firstOpenAt: number | null;
     firstOpenSource: FirstOpenSource | null;
     windowMs: number;
@@ -284,10 +294,11 @@ export function insertSignup(
   decision: Decision,
 ): void {
   db.prepare(
-    `INSERT INTO signups (user_id, install_id, signup_at, first_open_at, first_open_source, window_ms, rule_version,
+    `INSERT INTO signups (user_id, install_id, signup_at, signup_at_source, server_signup_at, backend_signed_up_at,
+                          first_open_at, first_open_source, window_ms, rule_version,
                           last_rejected_id, origin, reason, winning_touch_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(s.userId, s.installId, s.signupAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, s.ruleVersion, s.lastRejectedId, decision.origin, decision.reason, decision.winnerTouchId);
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(s.userId, s.installId, s.signupAt, s.signupAtSource, s.serverSignupAt, s.backendSignedUpAt, s.firstOpenAt, s.firstOpenSource, s.windowMs, s.ruleVersion, s.lastRejectedId, decision.origin, decision.reason, decision.winnerTouchId);
   const stmt = db.prepare("INSERT INTO signup_touches (user_id, touch_id, result, reason) VALUES (?, ?, ?, ?)");
   for (const v of decision.verdicts) stmt.run(s.userId, v.touchId, v.result, v.reason);
 }

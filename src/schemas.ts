@@ -140,6 +140,8 @@ export const touchBodySchema = z.object({
 export const signupBodySchema = z.object({
   user_id: idSchema,
   install_id: idSchema,
+  /** Quando o cadastro aconteceu segundo o backend de contas (a chamada pode chegar atrasada). */
+  signed_up_at: isoDateTimeSchema.optional(),
 });
 
 export const userParamSchema = z.object({ userId: idSchema });

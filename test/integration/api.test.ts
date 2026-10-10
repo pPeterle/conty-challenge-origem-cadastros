@@ -375,6 +375,47 @@ describe("cadastro e auditoria", () => {
     expect(body.toques_apos_cadastro).toMatchObject([{ click_id: "clk_ref00001", relogio_diverge: true }]);
   });
 
+  it("cadastro que chega atrasado com link aberto no meio: vale o signed_up_at e o link do meio não vence", async () => {
+    const { click, post, clock } = setup();
+    await post("/installs", { install_id: "inst_1" });
+    clock.advance(HOUR);
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
+    clock.advance(HOUR); // 14:00: o cadastro acontece no backend de contas
+    const signedUpAt = clock.now().toISOString();
+    clock.advance(HOUR); // 15:00: a pessoa abre um link de indicação
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
+    clock.advance(HOUR); // 16:00: só agora a chamada de cadastro chega aqui
+    const res = await post("/signups", { user_id: "u_1", install_id: "inst_1", signed_up_at: signedUpAt });
+    const body = (await res.json()) as Attribution & { signup_at: string; signup_at_fonte: string; signup_recebido_em: string };
+    expect(body).toMatchObject({
+      signup_at: "2026-03-01T14:00:00.000Z",
+      signup_at_fonte: "backend",
+      signup_recebido_em: "2026-03-01T16:00:00.000Z",
+    });
+    expect(body.origem).toMatchObject({ tipo: "campanha", click_id: "clk_camp0001" });
+    expect(body.toques_considerados.map((t) => [t.click_id, t.resultado, t.motivo])).toEqual([
+      ["clk_camp0001", "venceu", "toque_mais_recente_na_janela"],
+      ["clk_ref00001", "perdeu", "posterior_ao_cadastro"],
+    ]);
+  });
+
+  it.each([
+    ["no futuro além de 5 min", "2026-03-01T13:06:00.000Z"],
+    ["antes da primeira abertura", "2026-03-01T11:59:59.000Z"],
+  ])("signed_up_at %s é ignorado e vale o horário do servidor", async (_nome, signedUpAt) => {
+    const { post, clock } = setup();
+    await post("/installs", { install_id: "inst_1" });
+    clock.advance(HOUR);
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1", signed_up_at: signedUpAt })).json()) as {
+      signup_at: string;
+      signup_at_fonte: string;
+      signed_up_at_backend: string;
+    };
+    expect(body).toEqual(
+      expect.objectContaining({ signup_at: "2026-03-01T13:00:00.000Z", signup_at_fonte: "servidor", signed_up_at_backend: signedUpAt }),
+    );
+  });
+
   it("cada cadastro grava a versão da regra que o decidiu e a auditoria mostra", async () => {
     const { click, post, get, db } = setup();
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
