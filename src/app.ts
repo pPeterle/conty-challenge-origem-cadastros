@@ -21,7 +21,9 @@ import {
 import {
   auditForSignup,
   ensureInstall,
+  getClick,
   getInstall,
+  insertClick,
   getSignup,
   insertSignup,
   insertTouch,
@@ -74,6 +76,7 @@ function touchView(t: TouchRow) {
     click_id: t.click_id,
     source: t.source,
     params: JSON.parse(t.params) as Record<string, string>,
+    clicked_at: iso(t.clicked_at),
     touched_at: iso(t.touched_at),
     client_opened_at: t.client_opened_at,
   };
@@ -148,9 +151,13 @@ export function createApp(deps: AppDeps) {
 
   app.get("/health", (c) => c.json({ ok: true }));
 
-  // Redirecionador: o link público não tem cid; aqui cada clique ganha o seu.
+  // Redirecionador: o link público não tem cid; aqui cada clique ganha o seu, e o clique
+  // fica gravado. É esse registro que define a fonte, então editar a URL no caminho não adianta.
   app.get("/l", validate("query", linkQuerySchema, "link_invalido"), (c) => {
-    return c.redirect(buildAppLink(config.appLinkBase, c.req.valid("query"), newClickId()), 302);
+    const link = c.req.valid("query");
+    const clickId = newClickId();
+    insertClick(db, { clickId, source: link.source, params: link.params, clickedAt: clock.now().getTime() });
+    return c.redirect(buildAppLink(config.appLinkBase, link, clickId), 302);
   });
 
   // Primeira abertura do app. Repetir não muda o first_open_at (ver ensureInstall).
@@ -167,6 +174,14 @@ export function createApp(deps: AppDeps) {
     const link = parseAppLink(body.url, config.appLinkBase);
     if (!link.ok) return fail(c, 400, "link_invalido", link.message, link.details);
 
+    const click = getClick(db, link.value.clickId);
+    if (!click) {
+      return fail(c, 400, "click_desconhecido", "esse cid não foi emitido pelo redirecionador (GET /l)");
+    }
+    if (click.source !== link.value.source || click.params !== JSON.stringify(link.value.params)) {
+      return fail(c, 409, "click_divergente", "fonte ou parâmetros da url não batem com o clique gravado");
+    }
+
     const now = clock.now().getTime();
     const outcome = transaction(db, () => {
       // Se o toque chega antes do registro de primeira abertura, ele mesmo registra.
@@ -174,8 +189,8 @@ export function createApp(deps: AppDeps) {
       return insertTouch(db, {
         clickId: link.value.clickId,
         installId: body.install_id,
-        source: link.value.source,
-        params: link.value.params,
+        source: click.source,
+        params: JSON.parse(click.params) as Record<string, string>,
         touchedAt: now,
         clientOpenedAt: body.opened_at ? new Date(body.opened_at).toISOString() : null,
       });
@@ -183,11 +198,6 @@ export function createApp(deps: AppDeps) {
 
     if (outcome.touch.install_id !== body.install_id) {
       return fail(c, 409, "click_de_outro_install", "esse click_id já foi registrado por outro install");
-    }
-    const sameLink =
-      outcome.touch.source === link.value.source && outcome.touch.params === JSON.stringify(link.value.params);
-    if (!outcome.created && !sameLink) {
-      return fail(c, 409, "click_divergente", "esse click_id já foi registrado com outra fonte ou outros parâmetros");
     }
     return c.json(
       { install_id: body.install_id, ...touchView(outcome.touch), duplicado: !outcome.created },

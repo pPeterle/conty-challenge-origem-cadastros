@@ -1,6 +1,7 @@
 import { createApp } from "../../src/app.ts";
 import { DAY, FixedClock } from "../../src/clock.ts";
-import { openDb } from "../../src/db.ts";
+import { getClick, insertClick, openDb } from "../../src/db.ts";
+import { parseAppLink } from "../../src/link.ts";
 import { DEFAULT_FIRST_OPEN_LIMITS } from "../../src/config.ts";
 
 export const START = "2026-03-01T12:00:00.000Z";
@@ -18,7 +19,15 @@ export function setup(opts: { windowMs?: number } = {}) {
   const post = (path: string, body: unknown) =>
     app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const get = (path: string) => app.request(path);
-  return { app, db, clock, post, get };
+  /** Grava o clique como o redirecionador faria e devolve a mesma url, para usar em POST /touches. */
+  const click = (url: string, clickedAt = clock.now().getTime()) => {
+    const link = parseAppLink(url, "https://conty.app/abrir");
+    if (!link.ok) throw new Error(`url de teste inválida: ${link.message}`);
+    if (getClick(db, link.value.clickId)) return url;
+    insertClick(db, { clickId: link.value.clickId, source: link.value.source, params: link.value.params, clickedAt });
+    return url;
+  };
+  return { app, db, clock, post, get, click };
 }
 
 export const campaignLink = (cid: string, cmp = "cmp_123") =>

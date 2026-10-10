@@ -21,9 +21,18 @@ CREATE TABLE IF NOT EXISTS installs (
   device_first_open_at INTEGER             -- o que o aparelho informou, aceito ou não
 );
 
+-- Gravado pelo redirecionador antes do 302. A fonte e os parâmetros que valem são estes,
+-- não os que voltam na URL do app.
+CREATE TABLE IF NOT EXISTS clicks (
+  click_id   TEXT PRIMARY KEY,
+  source     TEXT NOT NULL CHECK (source IN ('campanha','indicacao','comunidade')),
+  params     TEXT NOT NULL,
+  clicked_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS touches (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  click_id         TEXT NOT NULL UNIQUE,
+  click_id         TEXT NOT NULL UNIQUE REFERENCES clicks(click_id),
   install_id       TEXT NOT NULL REFERENCES installs(install_id),
   source           TEXT NOT NULL CHECK (source IN ('campanha','indicacao','comunidade')),
   params           TEXT NOT NULL,
@@ -82,6 +91,13 @@ export interface InstallRow {
   device_first_open_at: number | null;
 }
 
+export interface ClickRow {
+  click_id: string;
+  source: Source;
+  params: string;
+  clicked_at: number;
+}
+
 export interface TouchRow {
   id: number;
   click_id: string;
@@ -90,6 +106,7 @@ export interface TouchRow {
   params: string;
   touched_at: number;
   client_opened_at: string | null;
+  clicked_at: number | null;
 }
 
 export interface SignupRow {
@@ -145,6 +162,19 @@ export function getInstall(db: Db, installId: string): InstallRow | undefined {
   return db.prepare("SELECT * FROM installs WHERE install_id = ?").get(installId) as InstallRow | undefined;
 }
 
+export function insertClick(db: Db, c: { clickId: string; source: Source; params: Record<string, string>; clickedAt: number }) {
+  db.prepare("INSERT INTO clicks (click_id, source, params, clicked_at) VALUES (?, ?, ?, ?)").run(
+    c.clickId,
+    c.source,
+    JSON.stringify(c.params),
+    c.clickedAt,
+  );
+}
+
+export function getClick(db: Db, clickId: string): ClickRow | undefined {
+  return db.prepare("SELECT * FROM clicks WHERE click_id = ?").get(clickId) as ClickRow | undefined;
+}
+
 export interface NewTouch {
   clickId: string;
   installId: string;
@@ -162,7 +192,7 @@ export function insertTouch(db: Db, t: NewTouch): { touch: TouchRow; created: bo
        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(click_id) DO NOTHING`,
     )
     .run(t.clickId, t.installId, t.source, JSON.stringify(t.params), t.touchedAt, t.clientOpenedAt);
-  const touch = db.prepare("SELECT * FROM touches WHERE click_id = ?").get(t.clickId) as unknown as TouchRow;
+  const touch = db.prepare(`SELECT t.*, (SELECT clicked_at FROM clicks c WHERE c.click_id = t.click_id) AS clicked_at FROM touches t WHERE t.click_id = ?`).get(t.clickId) as unknown as TouchRow;
   return { touch, created: res.changes === 1 };
 }
 
@@ -170,7 +200,7 @@ export function insertTouch(db: Db, t: NewTouch): { touch: TouchRow; created: bo
 export function touchesForInstall(db: Db, installId: string): (TouchRow & { used_by: string | null })[] {
   return db
     .prepare(
-      `SELECT t.*, s.user_id AS used_by
+      `SELECT t.*, s.user_id AS used_by, (SELECT clicked_at FROM clicks c WHERE c.click_id = t.click_id) AS clicked_at
          FROM touches t LEFT JOIN signups s ON s.winning_touch_id = t.id
         WHERE t.install_id = ? ORDER BY t.id`,
     )
@@ -207,7 +237,7 @@ export function insertSignup(
 export function auditForSignup(db: Db, userId: string): AuditRow[] {
   return db
     .prepare(
-      `SELECT t.*, st.result, st.reason
+      `SELECT t.*, st.result, st.reason, (SELECT clicked_at FROM clicks c WHERE c.click_id = t.click_id) AS clicked_at
          FROM signup_touches st JOIN touches t ON t.id = st.touch_id
         WHERE st.user_id = ? ORDER BY t.touched_at, t.id`,
     )
@@ -218,7 +248,7 @@ export function auditForSignup(db: Db, userId: string): AuditRow[] {
 export function touchesAfterSignup(db: Db, userId: string, installId: string): TouchRow[] {
   return db
     .prepare(
-      `SELECT t.* FROM touches t
+      `SELECT t.*, (SELECT clicked_at FROM clicks c WHERE c.click_id = t.click_id) AS clicked_at FROM touches t
         WHERE t.install_id = ?
           AND NOT EXISTS (SELECT 1 FROM signup_touches st WHERE st.user_id = ? AND st.touch_id = t.id)
         ORDER BY t.touched_at, t.id`,

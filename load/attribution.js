@@ -80,6 +80,7 @@ const GARBAGE = [
   () => http.post(`${BASE}/touches`, JSON.stringify({ install_id: "lixo_5", url: "x".repeat(20000) }), JSON_HEADERS),
   () => http.get(`${BASE}/signups/nao_existe_${Math.floor(Math.random() * 1e6)}/attribution`),
   () => http.get(`${BASE}/l?src=indicacao`),
+  () => http.post(`${BASE}/touches`, JSON.stringify({ install_id: "lixo_6", url: link("campanha", "cmp=x", "clk_inventado_por_alguem") }), JSON_HEADERS),
   () => http.del(`${BASE}/touches`),
 ];
 
@@ -90,6 +91,18 @@ function garbage() {
   });
 }
 
+/** Clica no link público: o redirecionador grava o clique e devolve a url do app com o cid. */
+function clickLink(query) {
+  let res = http.get(`${BASE}/l?${query}`, { redirects: 0 });
+  for (let attempt = 0; attempt < 3 && res.status === 0; attempt++) {
+    sleep(0.05 * (attempt + 1));
+    res = http.get(`${BASE}/l?${query}`, { redirects: 0 });
+  }
+  check(res, { "clique: 302 com location": (r) => r.status === 302 && !!r.headers.Location });
+  const url = res.headers.Location;
+  return { url, cid: /[?&]cid=([^&]+)/.exec(url)[1] };
+}
+
 export default function () {
   // Espalha a abertura das conexões dos VUs em ~1 s (ver comentário no topo).
   if (exec.vu.iterationInInstance === 0) sleep((exec.vu.idInTest - 1) * 0.02);
@@ -97,8 +110,6 @@ export default function () {
   const i = exec.scenario.iterationInTest;
   const install = `inst_${pad(i)}`;
   const user = `u_${pad(i)}`;
-  const cidA = `clk_${pad(i)}_a`;
-  const cidB = `clk_${pad(i)}_b`;
 
   switch (i % 4) {
     case 0: {
@@ -109,23 +120,27 @@ export default function () {
       break;
     }
     case 1: {
-      sendTouch(install, link("campanha", "cmp=cmp_load&ch=instagram", cidA));
-      signup(install, user, { tipo: "campanha", click_id: cidA });
+      const a = clickLink("src=campanha&cmp=cmp_load&ch=instagram");
+      sendTouch(install, a.url);
+      signup(install, user, { tipo: "campanha", click_id: a.cid });
       break;
     }
     case 2: {
       // Dois links: indicação e depois campanha. Campanha vence por ser mais recente
       // (e também venceria um empate de milissegundo, pela prioridade).
-      sendTouch(install, link("indicacao", "ref=REF_LOAD", cidA));
-      sendTouch(install, link("campanha", "cmp=cmp_load", cidB));
-      signup(install, user, { tipo: "campanha", click_id: cidB });
+      const a = clickLink("src=indicacao&ref=REF_LOAD");
+      const b = clickLink("src=campanha&cmp=cmp_load");
+      sendTouch(install, a.url);
+      sendTouch(install, b.url);
+      signup(install, user, { tipo: "campanha", click_id: b.cid });
       break;
     }
     case 3: {
       // Toque depois do cadastro: registrado, mas não muda a origem.
-      sendTouch(install, link("indicacao", "ref=REF_LOAD", cidA));
-      signup(install, user, { tipo: "indicacao", click_id: cidA });
-      sendTouch(install, link("comunidade", "com=grupo_load", cidB));
+      const a = clickLink("src=indicacao&ref=REF_LOAD");
+      sendTouch(install, a.url);
+      signup(install, user, { tipo: "indicacao", click_id: a.cid });
+      sendTouch(install, clickLink("src=comunidade&com=grupo_load").url);
       break;
     }
   }

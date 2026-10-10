@@ -4,9 +4,9 @@ import { campaignLink, referralLink, setup } from "./helpers.ts";
 
 describe("concorrência e idempotência", () => {
   it("50 envios concorrentes do mesmo clique geram um toque só", async () => {
-    const { post, db } = setup();
+    const { click, post, db } = setup();
     const results = await Promise.all(
-      Array.from({ length: 50 }, () => post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") })),
+      Array.from({ length: 50 }, () => post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) })),
     );
     const statuses = results.map((r) => r.status).sort();
     expect(statuses.filter((s) => s === 201)).toHaveLength(1);
@@ -16,10 +16,10 @@ describe("concorrência e idempotência", () => {
   });
 
   it("cadastros duplicados concorrentes gravam uma origem só, igual em todas as respostas", async () => {
-    const { post, db, clock } = setup();
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    const { click, post, db, clock } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     clock.advance(HOUR);
-    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001") });
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
 
     const results = await Promise.all(
       Array.from({ length: 30 }, () => post("/signups", { user_id: "u_1", install_id: "inst_1" })),
@@ -35,11 +35,11 @@ describe("concorrência e idempotência", () => {
   });
 
   it("toques e cadastros misturados em vários installs: um toque por clique, uma origem por cadastro", async () => {
-    const { post, db } = setup();
+    const { click, post, db } = setup();
     const installs = Array.from({ length: 10 }, (_, i) => `inst_${i}`);
     await Promise.all(
       installs.flatMap((inst, i) =>
-        Array.from({ length: 5 }, () => post("/touches", { install_id: inst, url: campaignLink(`clk_${String(i).padStart(8, "0")}`) })),
+        Array.from({ length: 5 }, () => post("/touches", { install_id: inst, url: click(campaignLink(`clk_${String(i).padStart(8, "0")}`)) })),
       ),
     );
     await Promise.all(installs.flatMap((inst) => [1, 2, 3].map(() => post("/signups", { user_id: `u_${inst}`, install_id: inst }))));

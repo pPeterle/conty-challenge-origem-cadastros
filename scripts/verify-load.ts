@@ -30,17 +30,27 @@ const winners = count("SELECT COUNT(*) AS n FROM signups WHERE winning_touch_id 
 const distinctWinners = count("SELECT COUNT(DISTINCT winning_touch_id) AS n FROM signups");
 if (winners !== distinctWinners) errors.push("o mesmo toque virou origem de mais de um cadastro");
 
-const expected = (i: number): { origin: string; click: string | null } => {
+// O cid é gerado pelo servidor, então o esperado é descrito pela fonte do toque vencedor.
+const expected = (i: number): { origin: string; winnerSource: string | null; touches: number } => {
   switch (i % 4) {
-    case 0: return { origin: "organico", click: null };
-    case 1: return { origin: "campanha", click: `clk_${pad(i)}_a` };
-    case 2: return { origin: "campanha", click: `clk_${pad(i)}_b` };
-    default: return { origin: "indicacao", click: `clk_${pad(i)}_a` };
+    case 0: return { origin: "organico", winnerSource: null, touches: 0 };
+    case 1: return { origin: "campanha", winnerSource: "campanha", touches: 1 };
+    case 2: return { origin: "campanha", winnerSource: "campanha", touches: 2 };
+    default: return { origin: "indicacao", winnerSource: "indicacao", touches: 2 };
   }
 };
 
+const clicks = count("SELECT COUNT(*) AS n FROM clicks");
+if (clicks < touches) errors.push(`há toque sem clique gravado: ${touches} toques, ${clicks} cliques`);
+const mismatched = count(
+  "SELECT COUNT(*) AS n FROM touches t JOIN clicks c ON c.click_id = t.click_id WHERE c.source <> t.source OR c.params <> t.params",
+);
+if (mismatched) errors.push(`${mismatched} toques com fonte/params diferentes do clique gravado`);
+const touchesOfInstall = db.prepare("SELECT COUNT(*) AS n FROM touches WHERE install_id = ?");
+
 const signupStmt = db.prepare(
-  `SELECT s.*, t.click_id AS winning_click FROM signups s LEFT JOIN touches t ON t.id = s.winning_touch_id WHERE s.user_id = ?`,
+  `SELECT s.*, t.source AS winning_source, t.install_id AS winning_install
+     FROM signups s LEFT JOIN touches t ON t.id = s.winning_touch_id WHERE s.user_id = ?`,
 );
 const snapshotStmt = db.prepare(
   `SELECT t.id, t.click_id, t.source, t.touched_at, st.result, st.reason
@@ -50,13 +60,25 @@ let recomputed = 0;
 for (let i = 0; i < cfg.installs; i++) {
   const user = `u_${pad(i)}`;
   const s = signupStmt.get(user) as
-    | { origin: string; reason: string; winning_click: string | null; signup_at: number; first_open_at: number; window_ms: number }
+    | {
+        origin: string;
+        reason: string;
+        install_id: string;
+        winning_source: string | null;
+        winning_install: string | null;
+        signup_at: number;
+        first_open_at: number;
+        window_ms: number;
+      }
     | undefined;
   if (!s) { errors.push(`${user}: sem cadastro`); continue; }
   const exp = expected(i);
-  if (s.origin !== exp.origin || s.winning_click !== exp.click) {
-    errors.push(`${user}: origem ${s.origin}/${s.winning_click}, esperado ${exp.origin}/${exp.click}`);
+  if (s.origin !== exp.origin || s.winning_source !== exp.winnerSource) {
+    errors.push(`${user}: origem ${s.origin}/${s.winning_source}, esperado ${exp.origin}/${exp.winnerSource}`);
   }
+  if (s.winning_install !== null && s.winning_install !== s.install_id) errors.push(`${user}: venceu toque de outro install`);
+  const n = (touchesOfInstall.get(s.install_id) as { n: number }).n;
+  if (n !== exp.touches) errors.push(`${user}: ${n} toques no install, esperado ${exp.touches}`);
   // A auditoria gravada precisa ser reproduzível pela função pura.
   const snap = snapshotStmt.all(user) as { id: number; click_id: string; source: Source; touched_at: number; result: string; reason: string }[];
   const d = decideAttribution({
@@ -71,14 +93,15 @@ for (let i = 0; i < cfg.installs; i++) {
   else recomputed++;
   if (i % 4 === 3) {
     const late = count(
-      `SELECT COUNT(*) AS n FROM touches t WHERE t.click_id = ? AND NOT EXISTS
+      `SELECT COUNT(*) AS n FROM touches t WHERE t.install_id = ? AND t.source = 'comunidade' AND NOT EXISTS
          (SELECT 1 FROM signup_touches st WHERE st.touch_id = t.id AND st.user_id = ?)`,
-      `clk_${pad(i)}_b`, user,
+      s.install_id, user,
     );
     if (late !== 1) errors.push(`${user}: toque posterior ao cadastro não ficou fora da decisão`);
   }
 }
 
+console.log(`cliques gravados: ${clicks}`);
 console.log(`toques: ${touches} (esperado ${expectedTouches}), cliques distintos: ${distinctClicks}`);
 console.log(`installs: ${installs} (esperado ${cfg.installs})`);
 console.log(`cadastros: ${signups} (esperado ${cfg.installs}), origens conferidas e auditorias recalculadas: ${recomputed}`);

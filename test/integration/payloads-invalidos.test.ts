@@ -88,21 +88,21 @@ async function expectError(res: Response, status: number) {
 
 describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFields }) => {
   it.each(malformed)("%s devolve 400 e não grava nada", async (_nome, corpo) => {
-    const { app, db } = setup();
+    const { click, app, db } = setup();
     await expectError(await raw(app, path, corpo), 400);
     expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
   });
 
   for (const field of idFields) {
     it.each(badIds)(`${field} %s devolve 400 e não grava nada`, async (_nome, value) => {
-      const { post, db } = setup();
+      const { click, post, db } = setup();
       await expectError(await post(path, { ...valid, [field]: value }), 400);
       expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
     });
   }
 
   it("corpo acima do limite devolve 413 e não grava nada", async () => {
-    const { app, db } = setup();
+    const { click, app, db } = setup();
     const big = JSON.stringify({ ...valid, lixo: "x".repeat(MAX_BODY_BYTES) });
     const res = await raw(app, path, big);
     await expectError(res, 413);
@@ -110,7 +110,8 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
   });
 
   it("campos extras desconhecidos são ignorados", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
+    click(VALID_URL);
     const res = await post(path, { ...valid, extra: { a: [1, 2] }, __proto__x: 1 });
     expect(res.status).toBe(201);
   });
@@ -118,7 +119,7 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
   it.each(["text/plain", "application/x-www-form-urlencoded", ""])(
     "content-type %j devolve 400 content_type_invalido e não grava nada",
     async (type) => {
-      const { app, db } = setup();
+      const { click, app, db } = setup();
       const res = await raw(app, path, JSON.stringify(valid), type);
       await expectError(res, 400);
       expect(((await app.request(path, { method: "POST", body: JSON.stringify(valid) })).status)).toBe(400);
@@ -127,12 +128,13 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
   );
 
   it("content-type application/json com charset é aceito", async () => {
-    const { app } = setup();
+    const { click, app } = setup();
+    click(VALID_URL);
     expect((await raw(app, path, JSON.stringify(valid), "application/json; charset=utf-8")).status).toBe(201);
   });
 
   it("erro de validação traz details com campo e motivo", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     const res = await post(path, { ...valid, install_id: 42 });
     expect(await res.json()).toMatchObject({
       error: { code: "validacao", details: [{ campo: "install_id", motivo: "esperado texto, veio número" }] },
@@ -142,13 +144,14 @@ describe.each(routes)("payloads inválidos em POST $path", ({ path, valid, idFie
 
 describe("payloads inválidos em POST /touches", () => {
   it.each(badTouchFields)("%s devolve 400 e não grava nada", async (_nome, body) => {
-    const { post, db } = setup();
+    const { click, post, db } = setup();
     await expectError(await post("/touches", body), 400);
     expect(tableCounts(db)).toEqual([0, 0, 0, 0]);
   });
 
   it("opened_at com fuso diferente de Z é aceito e normalizado para UTC", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
+    click(VALID_URL);
     const res = await post("/touches", { install_id: "inst_1", url: VALID_URL, opened_at: "2026-03-01T09:00:00-03:00" });
     expect(res.status).toBe(201);
     expect(((await res.json()) as { client_opened_at: string }).client_opened_at).toBe("2026-03-01T12:00:00.000Z");
@@ -163,7 +166,7 @@ describe("rotas, métodos e ids inexistentes", () => {
     ["GET", "/touches"],
     ["GET", "/signups/u_nao_existe/attribution"],
   ])("%s %s devolve 404 JSON", async (method, path) => {
-    const { app } = setup();
+    const { click, app } = setup();
     const res = await app.request(path, { method });
     await expectError(res, 404);
   });
@@ -173,7 +176,7 @@ describe("rotas, métodos e ids inexistentes", () => {
     ["5000 caracteres", `/signups/${"a".repeat(5000)}/attribution`],
     ["espaço", "/signups/u%201/attribution"],
   ])("user_id inválido na rota (%s) devolve 400", async (_nome, path) => {
-    const { get } = setup();
+    const { click, get } = setup();
     await expectError(await get(path), 400);
   });
 
@@ -184,12 +187,12 @@ describe("rotas, métodos e ids inexistentes", () => {
     "/l?src=campanha&cmp=%00",
     `/l?src=campanha&cmp=${"a".repeat(65)}`,
   ])("GET %s inválido devolve 400", async (path) => {
-    const { get } = setup();
+    const { click, get } = setup();
     await expectError(await get(path), 400);
   });
 
   it("erro inesperado vira 500 JSON genérico, sem stack trace", async () => {
-    const { db, app } = setup();
+    const { click, db, app } = setup();
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     db.close(); // força o sqlite a lançar dentro do handler
     const res = await app.request("/installs", {

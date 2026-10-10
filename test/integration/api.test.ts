@@ -11,7 +11,7 @@ type Attribution = {
 
 describe("contrato do link (redirecionador)", () => {
   it("link de campanha redireciona para o app com cid novo a cada clique", async () => {
-    const { get } = setup();
+    const { click, get } = setup();
     const r1 = await get("/l?src=campanha&cmp=cmp_123&ch=instagram");
     const r2 = await get("/l?src=campanha&cmp=cmp_123&ch=instagram");
     expect(r1.status).toBe(302);
@@ -20,13 +20,60 @@ describe("contrato do link (redirecionador)", () => {
   });
 
   it("link de indicação redireciona com ref e cid", async () => {
-    const { get } = setup();
+    const { click, get } = setup();
     const r = await get("/l?src=indicacao&ref=MARIA2026");
     expect(r.headers.get("location")).toBe("https://conty.app/abrir?src=indicacao&ref=MARIA2026&cid=clk_test0001");
   });
 
+  it("o redirecionador grava o clique (cid, fonte, params, horário) antes do 302", async () => {
+    const { get, db } = setup();
+    await get("/l?src=campanha&cmp=cmp_123&ch=instagram&utm_source=lixo");
+    expect(db.prepare("SELECT * FROM clicks").all()).toEqual([
+      {
+        click_id: "clk_test0001",
+        source: "campanha",
+        params: JSON.stringify({ cmp: "cmp_123", ch: "instagram" }),
+        clicked_at: Date.parse(START),
+      },
+    ]);
+  });
+
+  it("fluxo completo: /l, toque com a url do redirect e cadastro usam a fonte gravada no clique", async () => {
+    const { get, post, clock } = setup();
+    const url = (await get("/l?src=indicacao&ref=MARIA2026")).headers.get("location")!;
+    clock.advance(MINUTE);
+    const touch = await post("/touches", { install_id: "inst_1", url });
+    expect(await touch.json()).toMatchObject({
+      click_id: "clk_test0001",
+      source: "indicacao",
+      params: { ref: "MARIA2026" },
+      clicked_at: START,
+      touched_at: "2026-03-01T12:01:00.000Z",
+    });
+    const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
+    expect(body.origem).toMatchObject({ tipo: "indicacao", click_id: "clk_test0001" });
+  });
+
+  it("cid que o redirecionador não emitiu é recusado com 400 click_desconhecido", async () => {
+    const { post, db } = setup();
+    const r = await post("/touches", { install_id: "inst_1", url: campaignLink("clk_inventado1") });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_desconhecido");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 0 });
+  });
+
+  it("origem forjada: trocar src ou params na url de um cid real devolve 409 click_divergente", async () => {
+    const { get, post, db } = setup();
+    const real = (await get("/l?src=comunidade&com=grupo_ugc")).headers.get("location")!;
+    const forged = real.replace("src=comunidade&com=grupo_ugc", "src=campanha&cmp=cmp_cara");
+    const r = await post("/touches", { install_id: "inst_1", url: forged });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_divergente");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM touches").get()).toEqual({ n: 0 });
+  });
+
   it("link inválido devolve 400 com erro em JSON", async () => {
-    const { get } = setup();
+    const { click, get } = setup();
     const r = await get("/l?src=indicacao");
     expect(r.status).toBe(400);
     expect(await r.json()).toEqual({
@@ -41,7 +88,7 @@ describe("contrato do link (redirecionador)", () => {
 
 describe("primeira abertura", () => {
   it("repetir o registro de primeira abertura não muda first_open_at", async () => {
-    const { post, clock } = setup();
+    const { click, post, clock } = setup();
     const a = await post("/installs", { install_id: "inst_1" });
     clock.advance(HOUR);
     const b = await post("/installs", { install_id: "inst_1" });
@@ -58,7 +105,7 @@ describe("primeira abertura", () => {
   });
 
   it("app que abriu offline: a janela conta do first_open_at informado pelo aparelho", async () => {
-    const { post, clock } = setup();
+    const { click, post, clock } = setup();
     clock.advance(5 * DAY); // abriu em START sem rede; o POST /installs só chega 5 dias depois
     const inst = await post("/installs", { install_id: "inst_1", first_open_at: START });
     expect(await inst.json()).toMatchObject({
@@ -68,7 +115,7 @@ describe("primeira abertura", () => {
       device_first_open_at: START,
     });
     clock.advance(3 * DAY); // dia 8 contado do aparelho: fora da janela de 7 dias
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.regra).toMatchObject({ janela_inicio: START, janela_inicio_fonte: "aparelho" });
     expect(body.origem).toMatchObject({ tipo: "organico", motivo: "cadastro_apos_janela" });
@@ -78,7 +125,7 @@ describe("primeira abertura", () => {
     ["no futuro além da tolerância de 5 min", "2026-03-01T12:06:00.000Z"],
     ["mais antigo que 30 dias", "2026-01-29T12:00:00.000Z"],
   ])("first_open_at do aparelho %s é ignorado e vale o horário do servidor", async (_nome, deviceAt) => {
-    const { post } = setup();
+    const { click, post } = setup();
     const r = await post("/installs", { install_id: "inst_1", first_open_at: deviceAt });
     expect(await r.json()).toMatchObject({
       first_open_at: START,
@@ -88,9 +135,9 @@ describe("primeira abertura", () => {
   });
 
   it("toque que chegou antes do POST /installs: o first_open_at do aparelho ainda corrige o início, uma vez só", async () => {
-    const { post, clock } = setup();
+    const { click, post, clock } = setup();
     clock.advance(HOUR);
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     const r = await post("/installs", { install_id: "inst_1", first_open_at: START });
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ first_open_at: START, first_open_source: "aparelho" });
@@ -99,8 +146,8 @@ describe("primeira abertura", () => {
   });
 
   it("toque que chega antes do registro de primeira abertura registra o install com o horário dele", async () => {
-    const { post, get } = setup();
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const { click, post, get } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     const body = (await (await get("/signups/u_1/attribution")).json()) as Attribution;
     expect(body.regra.janela_inicio).toBe(START);
@@ -109,11 +156,11 @@ describe("primeira abertura", () => {
 
 describe("toques e clique repetido", () => {
   it("o mesmo clique reenviado não cria segundo toque nem segunda origem", async () => {
-    const { post, clock, db } = setup();
+    const { click, post, clock, db } = setup();
     await post("/installs", { install_id: "inst_1" });
-    const first = await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const first = await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     clock.advance(MINUTE);
-    const again = await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const again = await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     expect(first.status).toBe(201);
     expect(again.status).toBe(200);
     expect(await again.json()).toMatchObject({ click_id: "clk_aaaa0001", duplicado: true, touched_at: START });
@@ -125,9 +172,9 @@ describe("toques e clique repetido", () => {
   });
 
   it("click_id de outro install devolve 409, mas a abertura do segundo install fica registrada", async () => {
-    const { post, db } = setup();
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
-    const r = await post("/touches", { install_id: "inst_2", url: campaignLink("clk_aaaa0001") });
+    const { click, post, db } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
+    const r = await post("/touches", { install_id: "inst_2", url: click(campaignLink("clk_aaaa0001")) });
     expect(r.status).toBe(409);
     expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_de_outro_install");
     expect(db.prepare("SELECT install_id FROM installs ORDER BY install_id").all()).toEqual([
@@ -142,8 +189,8 @@ describe("toques e clique repetido", () => {
     ["outra campanha", campaignLink("clk_aaaa0001", "cmp_999")],
     ["sem o canal", "https://conty.app/abrir?src=campanha&cmp=cmp_123&cid=clk_aaaa0001"],
   ])("mesmo cid reenviado com %s devolve 409 click_divergente e não altera o toque", async (_nome, url) => {
-    const { post, db } = setup();
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001") });
+    const { click, post, db } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")) });
     const r = await post("/touches", { install_id: "inst_1", url });
     expect(r.status).toBe(409);
     expect(((await r.json()) as { error: { code: string } }).error.code).toBe("click_divergente");
@@ -153,23 +200,23 @@ describe("toques e clique repetido", () => {
   });
 
   it("toque sem cid ou com payload inválido devolve 400", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     expect((await post("/touches", { install_id: "inst_1", url: "https://conty.app/abrir?src=campanha&cmp=x" })).status).toBe(400);
-    expect((await post("/touches", { install_id: "inst 1", url: campaignLink("clk_aaaa0001") })).status).toBe(400);
+    expect((await post("/touches", { install_id: "inst 1", url: click(campaignLink("clk_aaaa0001")) })).status).toBe(400);
     expect(
-      (await post("/touches", { install_id: "inst_1", url: campaignLink("clk_aaaa0001"), opened_at: "ontem" })).status,
+      (await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_aaaa0001")), opened_at: "ontem" })).status,
     ).toBe(400);
   });
 });
 
 describe("cadastro e auditoria", () => {
   it("dois links diferentes antes do cadastro: vence o mais recente e o outro aparece como perdedor", async () => {
-    const { post, get, clock } = setup();
+    const { click, post, get, clock } = setup();
     await post("/installs", { install_id: "inst_1" });
     clock.advance(HOUR);
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     clock.advance(2 * HOUR);
-    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001") });
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
     clock.advance(HOUR);
     const created = await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     expect(created.status).toBe(201);
@@ -188,11 +235,11 @@ describe("cadastro e auditoria", () => {
   });
 
   it("empate de horário: campanha vence indicação e comunidade, com motivo de desempate", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     // Relógio parado: os três toques têm o mesmo milissegundo.
-    await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
-    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001") });
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(communityLink("clk_com00001")) });
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.origem.tipo).toBe("campanha");
     expect(body.origem.motivo).toBe("venceu_empate_por_prioridade");
@@ -210,11 +257,11 @@ describe("cadastro e auditoria", () => {
     [["camp", "com", "ref"]],
     [["camp", "ref", "com"]],
   ])("ordem de chegada %j com o mesmo horário não muda a origem", async (order) => {
-    const { post } = setup();
+    const { click, post } = setup();
     const urls: Record<string, string> = {
-      com: communityLink("clk_com00001"),
-      ref: referralLink("clk_ref00001"),
-      camp: campaignLink("clk_camp0001"),
+      com: click(communityLink("clk_com00001")),
+      ref: click(referralLink("clk_ref00001")),
+      camp: click(campaignLink("clk_camp0001")),
     };
     for (const k of order) await post("/touches", { install_id: "inst_1", url: urls[k] });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
@@ -222,12 +269,12 @@ describe("cadastro e auditoria", () => {
   });
 
   it("toque fora da janela (medida do first_open_at) não vence: cadastro fora da janela vira orgânico", async () => {
-    const { post, clock } = setup({ windowMs: 7 * DAY });
+    const { click, post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });
     clock.advance(DAY);
-    await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
+    await post("/touches", { install_id: "inst_1", url: click(communityLink("clk_com00001")) });
     clock.advance(7 * DAY); // first_open + 8 dias: fora da janela
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.origem).toEqual({ tipo: "organico", motivo: "cadastro_apos_janela", click_id: null, params: null });
     expect(body.regra).toEqual({
@@ -246,31 +293,31 @@ describe("cadastro e auditoria", () => {
   });
 
   it("cadastro após o fim da janela vira orgânico", async () => {
-    const { post, clock } = setup({ windowMs: 7 * DAY });
+    const { click, post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });
     clock.advance(DAY);
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     clock.advance(59 * DAY);
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.origem).toMatchObject({ tipo: "organico", motivo: "cadastro_apos_janela" });
   });
 
   it("toque e cadastro no último milissegundo da janela ainda contam", async () => {
-    const { post, clock } = setup({ windowMs: 7 * DAY });
+    const { click, post, clock } = setup({ windowMs: 7 * DAY });
     await post("/installs", { install_id: "inst_1" });
     clock.advance(7 * DAY);
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.origem).toMatchObject({ tipo: "campanha", click_id: "clk_camp0001" });
   });
 
   it("toque posterior ao cadastro é registrado, aparece na auditoria e não altera a origem", async () => {
-    const { post, get, clock } = setup();
-    await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
+    const { click, post, get, clock } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(communityLink("clk_com00001")) });
     clock.advance(HOUR);
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     clock.advance(HOUR);
-    const late = await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    const late = await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     expect(late.status).toBe(201);
 
     const body = (await (await get("/signups/u_1/attribution")).json()) as Attribution;
@@ -282,19 +329,19 @@ describe("cadastro e auditoria", () => {
   });
 
   it("toque entregue depois do cadastro com opened_at anterior: relogio_diverge, sem mudar a origem", async () => {
-    const { post, get, clock } = setup();
+    const { click, post, get, clock } = setup();
     await post("/installs", { install_id: "inst_1" });
     clock.advance(HOUR);
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     clock.advance(MINUTE);
-    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001"), opened_at: "2026-03-01T12:30:00.000Z" });
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")), opened_at: "2026-03-01T12:30:00.000Z" });
     const body = (await (await get("/signups/u_1/attribution")).json()) as Attribution;
     expect(body.origem.tipo).toBe("organico");
     expect(body.toques_apos_cadastro).toMatchObject([{ click_id: "clk_ref00001", relogio_diverge: true }]);
   });
 
   it("cada cadastro grava a versão da regra que o decidiu e a auditoria mostra", async () => {
-    const { post, get, db } = setup();
+    const { click, post, get, db } = setup();
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     expect(db.prepare("SELECT rule_version FROM signups").get()).toEqual({ rule_version: "last_touch_v1" });
     const body = (await (await get("/signups/u_1/attribution")).json()) as { regra: { versao: string } };
@@ -302,7 +349,7 @@ describe("cadastro e auditoria", () => {
   });
 
   it("cadastro sem toque fica orgânico com motivo sem_toques gravado", async () => {
-    const { post, db } = setup();
+    const { click, post, db } = setup();
     await post("/installs", { install_id: "inst_1" });
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     expect(body.origem).toEqual({ tipo: "organico", motivo: "sem_toques", click_id: null, params: null });
@@ -313,18 +360,18 @@ describe("cadastro e auditoria", () => {
   });
 
   it("cadastro de install nunca visto fica orgânico com motivo install_desconhecido", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     const body = (await (await post("/signups", { user_id: "u_1", install_id: "inst_x" })).json()) as Attribution;
     expect(body.origem).toMatchObject({ tipo: "organico", motivo: "install_desconhecido" });
     expect(body.regra.janela_inicio).toBeNull();
   });
 
   it("cadastro repetido devolve a mesma decisão, mesmo com toque novo no meio", async () => {
-    const { post, clock } = setup();
-    await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
+    const { click, post, clock } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(communityLink("clk_com00001")) });
     const first = await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     clock.advance(MINUTE);
-    await post("/touches", { install_id: "inst_1", url: campaignLink("clk_camp0001") });
+    await post("/touches", { install_id: "inst_1", url: click(campaignLink("clk_camp0001")) });
     const again = await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     expect(first.status).toBe(201);
     expect(again.status).toBe(200);
@@ -335,17 +382,17 @@ describe("cadastro e auditoria", () => {
   });
 
   it("mesmo user_id vindo de outro install devolve 409", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     await post("/signups", { user_id: "u_1", install_id: "inst_1" });
     const r = await post("/signups", { user_id: "u_1", install_id: "inst_2" });
     expect(r.status).toBe(409);
   });
 
   it("segundo cadastro no mesmo aparelho não reaproveita o clique que já virou origem", async () => {
-    const { post, clock } = setup();
-    await post("/touches", { install_id: "inst_1", url: communityLink("clk_com00001") });
+    const { click, post, clock } = setup();
+    await post("/touches", { install_id: "inst_1", url: click(communityLink("clk_com00001")) });
     clock.advance(HOUR);
-    await post("/touches", { install_id: "inst_1", url: referralLink("clk_ref00001") });
+    await post("/touches", { install_id: "inst_1", url: click(referralLink("clk_ref00001")) });
     const a = (await (await post("/signups", { user_id: "u_1", install_id: "inst_1" })).json()) as Attribution;
     const b = (await (await post("/signups", { user_id: "u_2", install_id: "inst_1" })).json()) as Attribution;
     expect(a.origem.click_id).toBe("clk_ref00001");
@@ -354,14 +401,14 @@ describe("cadastro e auditoria", () => {
   });
 
   it("auditoria de cadastro inexistente devolve 404", async () => {
-    const { get } = setup();
+    const { click, get } = setup();
     const r = await get("/signups/nao_existe/attribution");
     expect(r.status).toBe(404);
     expect(await r.json()).toEqual({ error: { code: "cadastro_nao_encontrado", message: "cadastro não encontrado" } });
   });
 
   it("cadastro sem user_id devolve 400", async () => {
-    const { post } = setup();
+    const { click, post } = setup();
     expect((await post("/signups", { install_id: "inst_1" })).status).toBe(400);
   });
 });
