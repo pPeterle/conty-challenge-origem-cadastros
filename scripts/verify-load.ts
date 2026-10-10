@@ -21,6 +21,9 @@ const distinctClicks = count("SELECT COUNT(DISTINCT click_id) AS n FROM touches"
 if (touches !== expectedTouches) errors.push(`toques: esperado ${expectedTouches}, banco tem ${touches}`);
 if (distinctClicks !== touches) errors.push(`click_id repetido: ${touches} toques para ${distinctClicks} cliques`);
 
+const installs = count("SELECT COUNT(*) AS n FROM installs");
+if (installs !== cfg.installs) errors.push(`installs: esperado ${cfg.installs}, banco tem ${installs} (payload inválido gravou algo?)`);
+
 const signups = count("SELECT COUNT(*) AS n FROM signups");
 if (signups !== cfg.installs) errors.push(`cadastros: esperado ${cfg.installs}, banco tem ${signups}`);
 const winners = count("SELECT COUNT(*) AS n FROM signups WHERE winning_touch_id IS NOT NULL");
@@ -77,6 +80,7 @@ for (let i = 0; i < cfg.installs; i++) {
 }
 
 console.log(`toques: ${touches} (esperado ${expectedTouches}), cliques distintos: ${distinctClicks}`);
+console.log(`installs: ${installs} (esperado ${cfg.installs})`);
 console.log(`cadastros: ${signups} (esperado ${cfg.installs}), origens conferidas e auditorias recalculadas: ${recomputed}`);
 if (errors.length) {
   console.error(`FALHOU (${errors.length} problemas):\n` + errors.slice(0, 20).join("\n"));
